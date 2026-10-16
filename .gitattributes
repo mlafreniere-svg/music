@@ -1,0 +1,4 @@
+# Store text files with LF line endings and keep them as LF on Windows too.
+# This stops the "LF will be replaced by CRLF" warnings. Python, VS Code, and
+# Notepad all handle LF fine.
+* text=auto eol=lf

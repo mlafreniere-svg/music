@@ -4,6 +4,29 @@ All the commands used in this project, grouped by topic. Run them in PowerShell
 (Windows Terminal, or VS Code's terminal: Ctrl+`).
 
 Inside Claude Code, put `!` in front of a command to run it yourself, for example `! git status`.
+Only use `!` for commands; messages to Claude go without it.
+
+
+## Two shells: PowerShell and Git Bash
+
+A shell is the program that reads the commands you type. This project uses two:
+
+- **PowerShell** is Windows' own shell, used in Windows Terminal and VS Code. Everything in this file is written for PowerShell unless it says otherwise.
+- **Git Bash** is a Linux-style shell that comes with Git. Claude Code's `!` commands currently run in Git Bash (errors start with `/usr/bin/bash`).
+
+Git and Python commands work the same in both. The differences:
+
+| | PowerShell | Git Bash |
+|---|---|---|
+| Paths | `C:\Program Files\GitHub CLI\gh.exe` | `"/c/Program Files/GitHub CLI/gh.exe"` |
+| Activate venv | `.venv\Scripts\Activate.ps1` | `source .venv/Scripts/activate` |
+| PATH commands (`$env:Path ...`) | work | don't work |
+
+Run a program by its full path (when it isn't found on PATH), in Git Bash:
+```
+"/c/Program Files/GitHub CLI/gh.exe" repo view --web
+```
+The quotes are needed because of the space in "Program Files".
 
 
 ## Daily routine
@@ -107,14 +130,32 @@ Expand-Archive <zip> <folder>              # unzip it
 | Command | What it does |
 |---|---|
 | `git status` | Show what has changed: `M` = modified, `??` = new/untracked. |
-| `git diff` | Show the exact lines changed since the last commit. |
-| `git add <files>` | Stage changes for the next commit. |
+| `git diff` | Show the exact lines changed since the last commit. `-` = removed, `+` = added. |
+| `git diff <file>` | The same, for one file only. |
+| `git add <files>` | Stage changes for the next commit. List the files by name (safest). |
+| `git add .` | Stage every changed file in the folder (quicker; check `git status` first). |
+| `git add --dry-run .` | Show what `git add .` *would* stage, without staging anything. |
 | `git commit -m "message"` | Save the staged changes as a snapshot. |
 | `git push` | Upload your commits to GitHub. |
 | `git log --oneline` | List past commits, one per line. |
 | `git show <id>` | Show what a specific commit changed. |
+| `git restore <file>` | ⚠️ Throw away uncommitted changes to a file and go back to the last commit. Can't be undone. |
+| `git ls-files --eol` | Show each file's line endings (`lf`/`crlf`) in git (`i/`) and on disk (`w/`). |
 
-The usual cycle: edit files, then `git status`, `git add ...`, `git commit -m "..."`, `git push`.
+The usual cycle: edit files, then `git status`, `git diff`, `git add ...`, `git commit -m "..."`, `git push`.
+
+Reading the output:
+- `git status`: files under "Changes to be committed" are staged; "Untracked files" are new to git.
+- `git commit`: `[main fc006a6]` is the new commit's ID; "3 files changed, 291 insertions(+)" counts lines.
+- `git push`: `6f9ae55..fc006a6 main -> main` means GitHub moved from the old commit to the new one.
+- `git status` saying "ahead of 'origin/main' by 1 commit" means there's a commit that isn't pushed yet.
+
+In VS Code, the **Source Control** icon on the left (a branching line) does the same thing with buttons:
+type a message, then click **Commit** and **Sync/Push**.
+
+Special files:
+- `.gitignore` lists files git should never track (`.venv`, SoundFonts).
+- `.gitattributes` sets how git treats files. Here it keeps LF line endings, so the "LF will be replaced by CRLF" warnings stop.
 
 Used once to set up:
 ```
@@ -145,3 +186,8 @@ git config --global user.email "<email>"           # your email on commits
 | `Couldn't find the FluidSynth library` | FluidSynth's `bin` folder isn't on PATH in this terminal. Reopen the terminal. |
 | A `>>>` prompt appears unexpectedly | A typo in the command (e.g. `- m`). Type `exit()`. |
 | `fluidsynth: error: not enough MIDI in devices found` | Harmless: there's no MIDI keyboard plugged in. |
+| `git add` → `Nothing specified, nothing added.` | Tell it which files: `git add <files>` or `git add .` |
+| `fatal: pathspec 'status' did not match any files` | Two commands got combined (`git add status`). Git read `status` as a file name. Run `git status` and `git add <files>` separately. |
+| `warning: ... LF will be replaced by CRLF` | Harmless. Fixed for good by `.gitattributes`. |
+| `/usr/bin/bash: ... unexpected EOF while looking for matching` | A message to Claude was sent with `!` and ran as a command. Leave off the `!`. |
+| `/usr/bin/bash: line 1: gh: command not found` | Claude Code started before gh was on PATH. Use the full path (see "Two shells"), or restart Claude Code. |
