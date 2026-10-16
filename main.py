@@ -7,6 +7,7 @@ from PySide6.QtGui import QAction, QActionGroup, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QApplication, QMainWindow, QWidget
 
 from model import EIGHTH, HALF, QUARTER, WHOLE, Note, Part  # our own model.py
+from player import Player
 
 # Layout measurements, in pixels. Keeping them as named constants (instead of
 # typing numbers everywhere) means one change here updates the whole drawing.
@@ -297,6 +298,13 @@ class MainWindow(QMainWindow):
         self.delete_last_action.triggered.connect(self.staff.delete_last_note)
         toolbar.addAction(self.delete_last_action)
 
+        self.player = Player()
+        toolbar.addSeparator()
+        self.play_action = QAction("Play (Space)", self)
+        self.play_action.setShortcut("Space")
+        self.play_action.triggered.connect(self.on_play)
+        toolbar.addAction(self.play_action)
+
     def on_duration_chosen(self, action):
         """Slot: called by Qt when a duration button is chosen."""
         self.staff.current_duration = action.data()
@@ -304,6 +312,15 @@ class MainWindow(QMainWindow):
     def on_rest_toggled(self, checked):
         """Slot: called by Qt when the Rest button is switched on or off."""
         self.staff.rest_mode = checked
+
+    def on_play(self):
+        """Slot: play the staff from the beginning."""
+        self.player.play(self.staff.part)
+
+    def closeEvent(self, event):
+        # Qt calls this when the window is about to close: a chance to clean up.
+        self.player.close()
+        super().closeEvent(event)  # then let QMainWindow finish closing
 
 
 def main():

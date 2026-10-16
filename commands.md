@@ -132,6 +132,7 @@ Keyboard shortcuts inside the app:
 | `1` `2` `3` `4` | Choose whole / half / quarter / eighth. |
 | `R` | Turn rest mode on/off (clicks add rests of the chosen duration). |
 | `Backspace` | Delete the last note. |
+| `Space` | Play the staff from the beginning. |
 | Right-click a note | Delete that note. |
 
 
@@ -197,6 +198,13 @@ git config --global user.email "<email>"           # your email on commits
 | `gh auth status` | Check whether you're logged in. |
 | `gh repo create <name> --private --source . --push` | Create a GitHub repository from this folder and upload it. |
 | `gh repo view --web` | Open this project's GitHub page in your browser. |
+| `gh issue create --title "..." --body "..."` | Open a new issue (a bug or task to track). `--body-file <file>` reads a longer description from a file. |
+| `gh issue list` | List the open issues. |
+| `gh issue view <number>` | Show one issue, e.g. `gh issue view 1`. Add `--web` to open it in the browser. |
+| `gh issue close <number>` | Close an issue by hand. |
+
+**Issues** are GitHub's to-do list for bugs and ideas, numbered #1, #2, …
+Putting `Fixes #1` in a commit message closes issue #1 automatically when that commit is pushed.
 
 
 ## Errors we've hit and their fixes
@@ -211,6 +219,7 @@ git config --global user.email "<email>"           # your email on commits
 | A `>>>` prompt appears unexpectedly | A typo in the command (e.g. `- m`). Type `exit()`. |
 | `fluidsynth: error: not enough MIDI in devices found` | Harmless: there's no MIDI keyboard plugged in. |
 | `git add` → `Nothing specified, nothing added.` | Tell it which files: `git add <files>` or `git add .` |
+| `commit: command not found` | Git commands start with `git`: `git commit ...`. (And to upload commits, use `git push`.) |
 | `fatal: pathspec 'status' did not match any files` | Two commands got combined (`git add status`). Git read `status` as a file name. Run `git status` and `git add <files>` separately. |
 | `warning: ... LF will be replaced by CRLF` | Harmless. Fixed for good by `.gitattributes`. |
 | `/usr/bin/bash: ... unexpected EOF while looking for matching` | A message to Claude was sent with `!` and ran as a command. Leave off the `!`. |
