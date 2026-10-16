@@ -61,7 +61,7 @@ Completed milestones are marked with ✅.
 1. ✅ Set up the environment: install Python, a virtual environment, PySide6, FluidSynth, and a SoundFont. Play one note from a script.
 2. ✅ Window with a single staff; click to place quarter notes; draw the notes.
 3. ✅ Note durations palette, rests, delete; the data model (separate from drawing).
-4. Playback with FluidSynth: Play/Pause/Stop, tempo, moving cursor.
+4. ✅ Playback with FluidSynth: Play/Pause/Stop, tempo, moving cursor.
 5. Instrument tabs (add/remove), auto clef, mute/solo, multiple parts in sync.
 6. Save/load JSON.
 7. Undo/redo, dragging notes, pitch preview, scrolling as measures are added.
@@ -72,6 +72,7 @@ Completed milestones are marked with ✅.
 
 Ideas we've agreed on but are deliberately leaving out for now. Revisit them after the milestones are done.
 
+- **Show and choose the instrument:** playback is Acoustic Grand Piano, hard-coded in `player.py` (`PIANO = 0`, General MIDI program 0), and the app never says so. When milestone 5 adds instruments, make the current instrument visible on each tab and let the user choose it. (Raised during step 4c.)
 - **Ties across bar lines:** a note too long for what's left of its measure should be split at the bar line into two notes joined by a tie, e.g. a half note starting on beat 4 becomes two tied quarters. For now, the bar line goes after the note and that measure has too many beats. (Found in step 3c.)
 
 

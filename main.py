@@ -3,11 +3,11 @@
 import sys
 
 from PySide6.QtCore import QPointF, QRectF, Qt
-from PySide6.QtGui import QAction, QActionGroup, QPainter, QPainterPath, QPen
-from PySide6.QtWidgets import QApplication, QMainWindow, QWidget
+from PySide6.QtGui import QAction, QActionGroup, QColor, QPainter, QPainterPath, QPen
+from PySide6.QtWidgets import QApplication, QLabel, QMainWindow, QSlider, QWidget
 
 from model import EIGHTH, HALF, QUARTER, WHOLE, Note, Part  # our own model.py
-from player import Player
+from player import PAUSED, PLAYING, STOPPED, Player
 
 # Layout measurements, in pixels. Keeping them as named constants (instead of
 # typing numbers everywhere) means one change here updates the whole drawing.
@@ -43,6 +43,13 @@ DURATION_CHOICES = [
     ("Eighth", EIGHTH, "4"),
 ]
 
+# Playback cursor: a see-through band behind the note that's playing.
+# QColor(red, green, blue, alpha): alpha 0 is invisible, 255 is solid.
+CURSOR_COLOR = QColor(70, 130, 230, 60)
+
+MIN_TEMPO = 40   # beats per minute
+MAX_TEMPO = 200
+
 
 
 def step_to_y(step):
@@ -73,6 +80,13 @@ class StaffWidget(QWidget):
         self.current_duration = QUARTER
         # When True, clicks add rests instead of notes. The Rest button changes it.
         self.rest_mode = False
+        # The index of the note being played, or None when nothing is playing.
+        self.playing_index = None
+
+    def set_playing_index(self, index):
+        """Slot: move the playback cursor to this note (None hides it)."""
+        self.playing_index = index
+        self.update()
 
     def note_x(self, index):
         """The x position of the note at this place in the list (0 = first)."""
@@ -122,6 +136,14 @@ class StaffWidget(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)  # smooth edges
         painter.fillRect(self.rect(), Qt.white)        # paper background
+
+        # The cursor goes first, so the staff and notes are drawn on top of it.
+        if self.playing_index is not None:
+            x = self.note_x(self.playing_index)
+            top = step_to_y(HIGHEST_STEP + 2)
+            bottom = step_to_y(LOWEST_STEP - 2)
+            painter.fillRect(QRectF(x - NOTE_SPACING / 2, top, NOTE_SPACING, bottom - top), CURSOR_COLOR)
+
         painter.setPen(QPen(Qt.black, 1))
 
         right_edge = self.width() - MARGIN
@@ -263,7 +285,7 @@ class MainWindow(QMainWindow):
         self.staff = StaffWidget()
         self.setCentralWidget(self.staff)  # the staff fills the middle
 
-        toolbar = self.addToolBar("Durations")
+        toolbar = self.addToolBar("Editing")
         # A QActionGroup makes its buttons work like radio buttons:
         # checking one automatically unchecks the others.
         self.duration_group = QActionGroup(self)
@@ -298,12 +320,53 @@ class MainWindow(QMainWindow):
         self.delete_last_action.triggered.connect(self.staff.delete_last_note)
         toolbar.addAction(self.delete_last_action)
 
+        # Transport controls: the buttons that control playback. They get
+        # their own toolbar, on a second row (one long row didn't fit).
         self.player = Player()
-        toolbar.addSeparator()
-        self.play_action = QAction("Play (Space)", self)
-        self.play_action.setShortcut("Space")
+        self.addToolBarBreak()  # start a new row of toolbars
+        toolbar = self.addToolBar("Playback")
+        self.play_action = QAction("Play", self)
         self.play_action.triggered.connect(self.on_play)
         toolbar.addAction(self.play_action)
+        # The label switches between "Play" and "Resume". Make the button wide
+        # enough for the longer word, or Qt shortens it to "R...e".
+        toolbar.widgetForAction(self.play_action).setMinimumWidth(60)
+
+        self.pause_action = QAction("Pause", self)
+        self.pause_action.triggered.connect(self.player.pause)
+        toolbar.addAction(self.pause_action)
+
+        self.stop_action = QAction("Stop (Esc)", self)
+        self.stop_action.setShortcut("Escape")
+        self.stop_action.triggered.connect(self.player.stop)
+        toolbar.addAction(self.stop_action)
+
+        # Space switches between play and pause. This action isn't a toolbar
+        # button; adding it to the window just makes its shortcut work.
+        self.play_pause_action = QAction("Play/Pause", self)
+        self.play_pause_action.setShortcut("Space")
+        self.play_pause_action.triggered.connect(self.on_play_pause)
+        self.addAction(self.play_pause_action)
+
+        # Tempo: a slider plus a label showing its value.
+        toolbar.addSeparator()
+        toolbar.addWidget(QLabel(" Tempo "))  # toolbars can hold any widget, not just buttons
+        self.tempo_slider = QSlider(Qt.Horizontal)
+        self.tempo_slider.setRange(MIN_TEMPO, MAX_TEMPO)
+        self.tempo_slider.setValue(self.player.tempo_bpm)
+        self.tempo_slider.setFixedWidth(150)
+        self.tempo_slider.setFocusPolicy(Qt.NoFocus)  # keep Space for play/pause
+        toolbar.addWidget(self.tempo_slider)
+        self.tempo_label = QLabel()
+        toolbar.addWidget(self.tempo_label)
+        # valueChanged sends the slider's new number every time it moves.
+        self.tempo_slider.valueChanged.connect(self.on_tempo_changed)
+        self.on_tempo_changed(self.tempo_slider.value())  # show the starting value
+
+        # Keep the buttons and the cursor in step with the player.
+        self.player.state_changed.connect(self.update_transport_buttons)
+        self.player.note_started.connect(self.staff.set_playing_index)
+        self.update_transport_buttons(self.player.state)
 
     def on_duration_chosen(self, action):
         """Slot: called by Qt when a duration button is chosen."""
@@ -314,8 +377,33 @@ class MainWindow(QMainWindow):
         self.staff.rest_mode = checked
 
     def on_play(self):
-        """Slot: play the staff from the beginning."""
+        """Slot: start playing, or resume if paused."""
         self.player.play(self.staff.part)
+
+    def on_play_pause(self):
+        """Slot for Space: pause if playing, otherwise play."""
+        if self.player.state == PLAYING:
+            self.player.pause()
+        else:
+            self.on_play()
+
+    def update_transport_buttons(self, state):
+        """Slot: enable only the buttons that make sense in this state.
+
+        A disabled button is grayed out and can't be clicked.
+        """
+        self.play_action.setEnabled(state != PLAYING)
+        self.pause_action.setEnabled(state == PLAYING)
+        self.stop_action.setEnabled(state in (PLAYING, PAUSED))
+        # "Play" means "Resume" while paused; the label says so.
+        self.play_action.setText("Resume" if state == PAUSED else "Play")
+        if state == STOPPED:
+            self.staff.set_playing_index(None)  # hide the cursor
+
+    def on_tempo_changed(self, bpm):
+        """Slot: the tempo slider moved."""
+        self.player.tempo_bpm = bpm  # takes effect from the next note
+        self.tempo_label.setText(f" {bpm} BPM ")
 
     def closeEvent(self, event):
         # Qt calls this when the window is about to close: a chance to clean up.
@@ -327,7 +415,7 @@ def main():
     app = QApplication(sys.argv)  # every Qt program needs exactly one of these
 
     window = MainWindow()
-    window.resize(800, 240)
+    window.resize(800, 270)
     window.show()
 
     # Start the event loop: Qt now waits for clicks, key presses, and repaint

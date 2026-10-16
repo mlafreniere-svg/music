@@ -18,6 +18,12 @@ PIANO = 0       # General MIDI program number for Acoustic Grand Piano
 GAIN = 0.6      # master volume, 0-10; above ~1 notes played together can distort
 
 
+# The player is always in exactly one of these states.
+STOPPED = "stopped"
+PLAYING = "playing"
+PAUSED = "paused"
+
+
 class Player(QObject):
     """Plays the notes of a part, one after another, at a given tempo."""
 
@@ -25,6 +31,7 @@ class Player(QObject):
     # toolbar buttons' signals. Signal(int) means it sends one whole number.
     note_started = Signal(int)  # the index of the note that just started
     finished = Signal()         # the part reached its end
+    state_changed = Signal(str) # the new state: STOPPED, PLAYING, or PAUSED
 
     def __init__(self):
         super().__init__()
@@ -48,14 +55,25 @@ class Player(QObject):
         self.timer.setTimerType(Qt.PreciseTimer)
         self.timer.timeout.connect(self.play_next_note)
 
+        self.state = STOPPED
         self.notes = []            # what's being played
         self.clef = "treble"
         self.index = 0             # which note plays next
         self.sounding_pitch = None # the MIDI pitch currently held down, if any
         self.next_start_time = 0.0 # when the next note should begin (seconds)
+        self.paused_pitch = None   # the note that was sounding when we paused
+        self.time_left = 0.0       # seconds left on that note when we paused
+
+    def set_state(self, state):
+        """Change state and tell anyone listening (the window's buttons)."""
+        self.state = state
+        self.state_changed.emit(state)
 
     def play(self, part, clef="treble"):
-        """Start playing a part from the beginning."""
+        """Resume if paused; otherwise start the part from the beginning."""
+        if self.state == PAUSED:
+            self.resume()
+            return
         self.stop()
         # Copy the list, so editing the staff during playback can't change
         # what's being played halfway through.
@@ -65,15 +83,39 @@ class Player(QObject):
         # perf_counter() is a high-precision clock, in seconds. Only the
         # differences between its readings matter.
         self.next_start_time = time.perf_counter()
+        self.set_state(PLAYING)
         self.play_next_note()
 
+    def pause(self):
+        """Freeze playback where it is, remembering how far into the note we were."""
+        if self.state != PLAYING:
+            return
+        self.timer.stop()
+        self.time_left = max(0.0, self.next_start_time - time.perf_counter())
+        self.paused_pitch = self.sounding_pitch
+        self.release_note()
+        self.set_state(PAUSED)
+
+    def resume(self):
+        """Continue after a pause: finish the paused note, then carry on."""
+        if self.state != PAUSED:
+            return
+        # Re-sound the note that was cut off, for the time it had left.
+        if self.paused_pitch is not None:
+            self.synth.noteon(CHANNEL, self.paused_pitch, VELOCITY)
+            self.sounding_pitch = self.paused_pitch
+        # Shift the schedule: the next note is due time_left seconds from *now*.
+        self.next_start_time = time.perf_counter() + self.time_left
+        self.timer.start(round(self.time_left * 1000))
+        self.set_state(PLAYING)
+
     def stop(self):
-        """Stop playing and silence the current note."""
+        """Stop playing, silence the current note, and go back to the start."""
         self.timer.stop()
         self.release_note()
-
-    def is_playing(self):
-        return self.timer.isActive()
+        self.index = 0
+        if self.state != STOPPED:
+            self.set_state(STOPPED)
 
     def play_next_note(self):
         """Play one note, then set the timer for the one after it.
@@ -83,6 +125,7 @@ class Player(QObject):
         """
         self.release_note()  # let go of the previous note
         if self.index >= len(self.notes):
+            self.stop()
             self.finished.emit()  # emit = send the signal
             return
 
