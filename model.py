@@ -13,6 +13,8 @@ HALF = 2.0
 QUARTER = 1.0
 EIGHTH = 0.5
 
+BEATS_PER_MEASURE = 4  # 4/4 time: four quarter-note beats in every measure
+
 
 @dataclass
 class Note:
@@ -46,3 +48,30 @@ class Part:
     def add_note(self, note):
         """Add a note (or rest) to the end of the part."""
         self.notes.append(note)
+
+    def remove_note(self, index):
+        """Remove the note at this position (0 = first). Later notes move left."""
+        del self.notes[index]
+
+    def remove_last(self):
+        """Remove the last note, if there is one."""
+        if self.notes:  # an empty list counts as False, so this means "if not empty"
+            self.notes.pop()  # pop() removes the last item of a list
+
+    def measure_ends(self):
+        """The positions (indexes) of the notes that finish a measure.
+
+        A bar line belongs right after each of these notes. We add up the
+        beats as we go; whenever the total passes into a new measure, the
+        note that got us there ends the old one.
+        """
+        ends = []
+        beats = 0.0
+        for index, note in enumerate(self.notes):
+            # // is "floor division": divide and drop the remainder.
+            # 7 // 4 is 1, so beat 7 is in measure 1 (counting from 0).
+            measure_before = beats // BEATS_PER_MEASURE
+            beats += note.duration
+            if beats // BEATS_PER_MEASURE > measure_before:
+                ends.append(index)
+        return ends

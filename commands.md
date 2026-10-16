@@ -125,6 +125,15 @@ Expand-Archive <zip> <folder>              # unzip it
 | `python play_note.py` | Sound test: plays middle C. |
 | `python main.py` | Run the music staff app. |
 
+Keyboard shortcuts inside the app:
+
+| Key | What it does |
+|---|---|
+| `1` `2` `3` `4` | Choose whole / half / quarter / eighth. |
+| `R` | Turn rest mode on/off (clicks add rests of the chosen duration). |
+| `Backspace` | Delete the last note. |
+| Right-click a note | Delete that note. |
+
 
 ## Git (version control)
 
@@ -137,6 +146,7 @@ Expand-Archive <zip> <folder>              # unzip it
 | `git add .` | Stage every changed file in the folder (quicker; check `git status` first). |
 | `git add --dry-run .` | Show what `git add .` *would* stage, without staging anything. |
 | `git commit -m "message"` | Save the staged changes as a snapshot. |
+| `git commit --amend -m "message"` | ⚠️ Replace the most recent commit, e.g. to fix a typo in its message. **Only before `git push`.** |
 | `git push` | Upload your commits to GitHub. |
 | `git log --oneline` | List past commits, one per line. |
 | `git show <id>` | Show what a specific commit changed. |

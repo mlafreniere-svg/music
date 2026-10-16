@@ -2,7 +2,7 @@
 
 import sys
 
-from PySide6.QtCore import QPointF, Qt
+from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QAction, QActionGroup, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QApplication, QMainWindow, QWidget
 
@@ -70,20 +70,47 @@ class StaffWidget(QWidget):
         self.part = Part()
         # The duration that the next click will use. The toolbar changes it.
         self.current_duration = QUARTER
+        # When True, clicks add rests instead of notes. The Rest button changes it.
+        self.rest_mode = False
 
     def note_x(self, index):
         """The x position of the note at this place in the list (0 = first)."""
         return FIRST_NOTE_X + index * NOTE_SPACING
 
+    def note_index_at(self, x):
+        """The reverse of note_x: which note is at this x position?
+
+        Returns the note's index, or None if there's no note there.
+        """
+        index = round((x - FIRST_NOTE_X) / NOTE_SPACING)
+        if 0 <= index < len(self.part.notes):
+            return index
+        return None
+
+    def delete_last_note(self):
+        """Remove the last note and redraw."""
+        self.part.remove_last()
+        self.update()
+
     def mousePressEvent(self, event):
         # Qt calls this automatically whenever the mouse is clicked on us.
+        if event.button() == Qt.RightButton:
+            # Right-click deletes the note in that column, if there is one.
+            index = self.note_index_at(event.position().x())
+            if index is not None:  # "is not None", because index 0 is a real note
+                self.part.remove_note(index)
+                self.update()
+            return
         if event.button() != Qt.LeftButton:
             return
         # Ignore the click if the next note wouldn't fit before the right edge.
         # (Scrolling for longer pieces comes in a later milestone.)
         if self.note_x(len(self.part.notes)) > self.width() - MARGIN:
             return
-        step = y_to_step(event.position().y())
+        if self.rest_mode:
+            step = None  # a rest has no pitch, so the click's height doesn't matter
+        else:
+            step = y_to_step(event.position().y())
         self.part.add_note(Note(step, self.current_duration))
         self.update()  # ask Qt to repaint soon; it will call paintEvent
 
@@ -107,8 +134,19 @@ class StaffWidget(QWidget):
         for index, note in enumerate(self.part.notes):
             self.draw_note(painter, self.note_x(index), note)
 
+        # Bar lines: the model says where measures end; we draw a line
+        # halfway between that note and the next one.
+        painter.setPen(QPen(Qt.black, 1))
+        for index in self.part.measure_ends():
+            x = self.note_x(index) + NOTE_SPACING / 2
+            painter.drawLine(QPointF(x, step_to_y(TOP_LINE_STEP)), QPointF(x, step_to_y(0)))
+
     def draw_note(self, painter, x, note):
         """Draw one note at horizontal position x, shaped by its duration."""
+        if note.is_rest:
+            self.draw_rest(painter, x, note.duration)
+            return
+
         y = step_to_y(note.step)
         self.draw_ledger_lines(painter, x, note.step)
 
@@ -157,6 +195,46 @@ class StaffWidget(QWidget):
         painter.drawPath(path)
         painter.setPen(QPen(Qt.black, 1))
 
+    def draw_rest(self, painter, x, duration):
+        """Draw the rest symbol for this duration, centered at horizontal position x.
+
+        Rests sit at fixed heights on the staff. Positions are given in staff
+        steps (halves like 5.5 are allowed) so they scale with LINE_SPACING.
+        """
+        s = LINE_SPACING
+        if duration == WHOLE:
+            # A block hanging down from the 4th line (step 6).
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(Qt.black)
+            painter.drawRect(QRectF(x - s * 0.5, step_to_y(6), s, s * 0.5))
+        elif duration == HALF:
+            # A block sitting on top of the middle line (step 4).
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(Qt.black)
+            painter.drawRect(QRectF(x - s * 0.5, step_to_y(4) - s * 0.5, s, s * 0.5))
+        elif duration == QUARTER:
+            # A thick zig-zag with a small hook at the bottom.
+            path = QPainterPath(QPointF(x - s * 0.15, step_to_y(7)))
+            path.lineTo(x + s * 0.3, step_to_y(5.5))
+            path.lineTo(x - s * 0.25, step_to_y(4))
+            path.lineTo(x + s * 0.25, step_to_y(2.5))
+            path.quadTo(QPointF(x - s * 0.55, step_to_y(2.4)), QPointF(x + s * 0.05, step_to_y(1)))
+            painter.setPen(QPen(Qt.black, s * 0.2, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawPath(path)
+        elif duration == EIGHTH:
+            # A dot, a small curl to the right, then a slanted stroke down-left.
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(Qt.black)
+            painter.drawEllipse(QPointF(x - s * 0.25, step_to_y(5)), s * 0.18, s * 0.18)
+            path = QPainterPath(QPointF(x - s * 0.25, step_to_y(4.7)))
+            path.quadTo(QPointF(x + s * 0.1, step_to_y(4.5)), QPointF(x + s * 0.35, step_to_y(5.3)))
+            path.lineTo(x - s * 0.05, step_to_y(2))
+            painter.setPen(QPen(Qt.black, 1.6))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawPath(path)
+        painter.setPen(QPen(Qt.black, 1))  # put the normal pen back for whatever is drawn next
+
     def draw_ledger_lines(self, painter, x, step):
         """Draw short extra lines for notes above or below the staff."""
         half_width = NOTE_HEAD_WIDTH * 0.8
@@ -202,9 +280,30 @@ class MainWindow(QMainWindow):
         # "connect" is how we say "when this happens, call that."
         self.duration_group.triggered.connect(self.on_duration_chosen)
 
+        # The Rest button is a separate on/off switch, not part of the group,
+        # so it combines with whichever duration is chosen.
+        toolbar.addSeparator()  # a small divider line in the toolbar
+        self.rest_action = QAction("Rest (R)", self)
+        self.rest_action.setCheckable(True)
+        self.rest_action.setShortcut("R")
+        # toggled is a different signal: it sends True when switched on, False when off.
+        self.rest_action.toggled.connect(self.on_rest_toggled)
+        toolbar.addAction(self.rest_action)
+
+        toolbar.addSeparator()
+        self.delete_last_action = QAction("Delete Last (Backspace)", self)
+        self.delete_last_action.setShortcut("Backspace")
+        # A slot can be any method, even one on another object.
+        self.delete_last_action.triggered.connect(self.staff.delete_last_note)
+        toolbar.addAction(self.delete_last_action)
+
     def on_duration_chosen(self, action):
         """Slot: called by Qt when a duration button is chosen."""
         self.staff.current_duration = action.data()
+
+    def on_rest_toggled(self, checked):
+        """Slot: called by Qt when the Rest button is switched on or off."""
+        self.staff.rest_mode = checked
 
 
 def main():
