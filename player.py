@@ -15,6 +15,7 @@ SOUNDFONT = Path(__file__).parent / "soundfonts" / "GeneralUser-GS.sf2"
 CHANNEL = 0     # MIDI channel; milestone 5 gives each instrument its own
 VELOCITY = 100  # how hard each key is struck, 0-127
 PIANO = 0       # General MIDI program number for Acoustic Grand Piano
+GAIN = 0.6      # master volume, 0-10; above ~1 notes played together can distort
 
 
 class Player(QObject):
@@ -29,7 +30,7 @@ class Player(QObject):
         super().__init__()
         self.tempo_bpm = 100  # beats (quarter notes) per minute
 
-        self.synth = fluidsynth.Synth()
+        self.synth = fluidsynth.Synth(gain=GAIN)  # pyfluidsynth's default, 0.2, is too quiet
         # Open only the audio output. (Synth.start() would also open a MIDI
         # *input* for a hardware keyboard, which prints errors when there
         # isn't one plugged in.)

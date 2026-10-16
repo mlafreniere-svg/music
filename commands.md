@@ -178,6 +178,23 @@ Reading the output:
 In VS Code, the **Source Control** icon on the left (a branching line) does the same thing with buttons:
 type a message, then click **Commit** and **Sync/Push**.
 
+### Branches
+
+A **branch** is a separate line of commits, so a fix can be worked on without touching `main` until it's ready.
+
+| Command | What it does |
+|---|---|
+| `git branch` | List your branches; `*` marks the one you're on. |
+| `git switch -c <name>` | Create a new branch from where you are, and move to it. Note the space before `-c`. |
+| `git switch <name>` | Move to an existing branch, e.g. `git switch main`. |
+| `git merge <name>` | Bring another branch's commits into the branch you're on. |
+| `git branch -d <name>` | Delete a branch after it has been merged (its commits stay in `main`). |
+| `git commit -m "title" -m "more"` | Each extra `-m` adds a paragraph to the message, e.g. `-m "Fixes #1"`. |
+
+Branch names like `fix/1-quiet-playback` say the kind of work, the issue number, and a short description.
+
+The branch cycle: `git switch -c fix/...`, edit and commit, then `git switch main`, `git merge fix/...`, `git push`, `git branch -d fix/...`.
+
 Special files:
 - `.gitignore` lists files git should never track (`.venv`, SoundFonts).
 - `.gitattributes` sets how git treats files. Here it keeps LF line endings, so the "LF will be replaced by CRLF" warnings stop.
@@ -221,6 +238,7 @@ Putting `Fixes #1` in a commit message closes issue #1 automatically when that c
 | `git add` → `Nothing specified, nothing added.` | Tell it which files: `git add <files>` or `git add .` |
 | `commit: command not found` | Git commands start with `git`: `git commit ...`. (And to upload commits, use `git push`.) |
 | `fatal: pathspec 'status' did not match any files` | Two commands got combined (`git add status`). Git read `status` as a file name. Run `git status` and `git add <files>` separately. |
+| `git: 'switch-c' is not a git command` | A missing space: `git switch -c <name>`. |
 | `warning: ... LF will be replaced by CRLF` | Harmless. Fixed for good by `.gitattributes`. |
 | `/usr/bin/bash: ... unexpected EOF while looking for matching` | A message to Claude was sent with `!` and ran as a command. Leave off the `!`. |
 | `/usr/bin/bash: line 1: gh: command not found` | Claude Code started before gh was on PATH. Use the full path (see "Two shells"), or restart Claude Code. |

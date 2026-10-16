@@ -17,8 +17,9 @@ SOUNDFONT = Path(__file__).parent / "soundfonts" / "GeneralUser-GS.sf2"
 MIDDLE_C = 60
 VELOCITY = 100  # how hard the key is struck, 0-127 (louder = higher)
 CHANNEL = 0     # MIDI has 16 channels; each one can play a different instrument
+GAIN = 0.6      # master volume, 0-10 (pyfluidsynth's default, 0.2, is too quiet)
 
-synth = fluidsynth.Synth()
+synth = fluidsynth.Synth(gain=GAIN)
 synth.start(driver="dsound")  # DirectSound: the standard Windows audio output
 
 soundfont_id = synth.sfload(str(SOUNDFONT))
