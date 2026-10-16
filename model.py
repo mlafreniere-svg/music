@@ -15,6 +15,35 @@ EIGHTH = 0.5
 
 BEATS_PER_MEASURE = 4  # 4/4 time: four quarter-note beats in every measure
 
+# --- Pitch ---------------------------------------------------------------
+# MIDI numbers every key on a piano: 60 is middle C (C4), and each +1 is one
+# half step higher (one piano key, black or white).
+MIDDLE_C = 60
+
+# How many half steps above C each letter is: C D E F G A B.
+# The gaps are uneven (E-F and B-C are only 1 half step), which is why we
+# need this table instead of just multiplying.
+LETTER_SEMITONES = [0, 2, 4, 5, 7, 9, 11]
+
+# For each clef: how many letters the bottom staff line is above middle C.
+# Treble: bottom line is E4, 2 letters above C4 (C, D, E).
+# Bass:   bottom line is G2, 10 letters below C4.
+CLEF_BOTTOM_LINE = {
+    "treble": 2,
+    "bass": -10,
+}
+
+
+def step_to_midi(step, clef="treble"):
+    """Convert a staff step (0 = bottom line) to a MIDI pitch number."""
+    letters_above_c4 = step + CLEF_BOTTOM_LINE[clef]
+    # Split into whole octaves plus a letter within the octave (0-6).
+    # Floor division // and remainder % work for negative numbers too:
+    # -1 // 7 is -1 and -1 % 7 is 6, i.e. "one octave down, letter B".
+    octave = letters_above_c4 // 7
+    letter = letters_above_c4 % 7
+    return MIDDLE_C + 12 * octave + LETTER_SEMITONES[letter]
+
 
 @dataclass
 class Note:
@@ -34,6 +63,12 @@ class Note:
     def is_rest(self):
         """True if this is a rest. Use it like a value: note.is_rest"""
         return self.step is None
+
+    def midi_pitch(self, clef="treble"):
+        """This note's MIDI pitch, or None for a rest."""
+        if self.is_rest:
+            return None
+        return step_to_midi(self.step, clef)
 
 
 @dataclass

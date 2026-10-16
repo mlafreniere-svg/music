@@ -135,6 +135,19 @@ Keyboard shortcuts inside the app:
 | Right-click a note | Delete that note. |
 
 
+## Testing (pytest)
+
+| Command | What it does |
+|---|---|
+| `python -m pip install pytest` | Install pytest, the testing tool (once). |
+| `python -m pytest` | Run every test in `tests\`. One dot per passing test, `F` for a failure. |
+| `python -m pytest -v` | The same, listing each test by name (`-v` = verbose). |
+
+Tests live in `tests\test_*.py`. Each `test_` function is one test; `assert` means "this must be true".
+Use `python -m pytest` (not plain `pytest`) so the tests can find `model.py`.
+Run the tests after every change. If something fails, pytest shows the failing line and the values involved.
+
+
 ## Git (version control)
 
 | Command | What it does |

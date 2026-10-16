@@ -1,0 +1,97 @@
+"""Automated tests for model.py. Run them all with: python -m pytest
+
+pytest finds every function whose name starts with test_ and runs it.
+Each `assert` must be true; if one isn't, pytest reports that test as
+failed and shows the values involved.
+"""
+
+from model import EIGHTH, HALF, QUARTER, WHOLE, Note, Part, step_to_midi
+
+
+# --- Pitch ---------------------------------------------------------------
+
+def test_treble_staff_lines():
+    # The five lines of the treble staff: E G B D F ("Every Good Boy Does Fine").
+    assert step_to_midi(0) == 64  # E4
+    assert step_to_midi(2) == 67  # G4
+    assert step_to_midi(4) == 71  # B4
+    assert step_to_midi(6) == 74  # D5
+    assert step_to_midi(8) == 77  # F5
+
+
+def test_treble_spaces():
+    # The four spaces: F A C E.
+    assert step_to_midi(1) == 65  # F4
+    assert step_to_midi(3) == 69  # A4
+    assert step_to_midi(5) == 72  # C5
+    assert step_to_midi(7) == 76  # E5
+
+
+def test_ledger_lines_and_below_middle_c():
+    assert step_to_midi(-2) == 60  # middle C
+    assert step_to_midi(10) == 81  # A5
+    assert step_to_midi(-3) == 59  # B3: crosses down into the octave below
+
+
+def test_half_steps_between_e_f_and_b_c():
+    # Neighboring letters are usually 2 half steps apart, but E-F and B-C are 1.
+    assert step_to_midi(1) - step_to_midi(0) == 1  # E4 -> F4
+    assert step_to_midi(5) - step_to_midi(4) == 1  # B4 -> C5
+    assert step_to_midi(2) - step_to_midi(1) == 2  # F4 -> G4
+
+
+def test_bass_clef():
+    # Bass staff lines: G B D F A ("Good Boys Do Fine Always").
+    assert step_to_midi(0, "bass") == 43  # G2
+    assert step_to_midi(8, "bass") == 57  # A3
+    assert step_to_midi(10, "bass") == 60  # middle C: one ledger line above
+
+
+def test_note_midi_pitch():
+    assert Note(0).midi_pitch() == 64
+    assert Note(0).midi_pitch("bass") == 43
+    assert Note(None).midi_pitch() is None  # rests have no pitch
+
+
+# --- Notes and parts -----------------------------------------------------
+
+def test_note_defaults_to_quarter():
+    assert Note(4).duration == QUARTER
+
+
+def test_parts_do_not_share_notes():
+    a = Part()
+    b = Part()
+    a.add_note(Note(0))
+    assert len(a.notes) == 1
+    assert len(b.notes) == 0
+
+
+def test_remove_note_and_remove_last():
+    part = Part([Note(0), Note(1), Note(2)])
+    part.remove_note(1)
+    assert [n.step for n in part.notes] == [0, 2]
+    part.remove_last()
+    assert [n.step for n in part.notes] == [0]
+    part.remove_last()
+    part.remove_last()  # removing from an empty part must not crash
+    assert part.notes == []
+
+
+# --- Measures ------------------------------------------------------------
+
+def test_measure_ends_with_exact_measures():
+    part = Part([Note(0, WHOLE), Note(0, HALF), Note(0, HALF), Note(0)])
+    assert part.measure_ends() == [0, 2]
+
+
+def test_measure_ends_with_eighths():
+    part = Part([Note(0, EIGHTH)] * 8)  # eight eighths = one measure
+    assert part.measure_ends() == [7]
+
+
+def test_measure_ends_when_a_note_overflows():
+    # 3 quarters + a half = 5 beats: the bar line goes after the half note.
+    # (Ties will handle this properly later; see projectplan.md.)
+    part = Part([Note(0), Note(0), Note(0), Note(0, HALF)])
+    assert part.measure_ends() == [3]
