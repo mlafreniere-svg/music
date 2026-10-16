@@ -112,6 +112,7 @@ Expand-Archive <zip> <folder>              # unzip it
 | `python -m pip install -r requirements.txt` | Install every package listed in `requirements.txt`. |
 | `python -m pip list` | Show the installed packages. |
 | `python <file>.py` | Run a Python program. |
+| `python` | Start the interactive `>>>` prompt: type Python one line at a time and see results immediately. Good for trying things out, e.g. `from model import Note`. |
 | `exit()` | Leave the interactive `>>>` Python prompt. |
 
 `-m` must be written with no space (`-m`, not `- m`).

@@ -3,8 +3,10 @@
 import sys
 
 from PySide6.QtCore import QPointF, Qt
-from PySide6.QtGui import QPainter, QPen
-from PySide6.QtWidgets import QApplication, QWidget
+from PySide6.QtGui import QAction, QActionGroup, QPainter, QPainterPath, QPen
+from PySide6.QtWidgets import QApplication, QMainWindow, QWidget
+
+from model import EIGHTH, HALF, QUARTER, WHOLE, Note, Part  # our own model.py
 
 # Layout measurements, in pixels. Keeping them as named constants (instead of
 # typing numbers everywhere) means one change here updates the whole drawing.
@@ -31,6 +33,16 @@ MIDDLE_LINE_STEP = 4
 LOWEST_STEP = -2    # middle C, one ledger line below the staff
 HIGHEST_STEP = 10   # A5, one ledger line above the staff
 
+# The duration buttons: (label, duration, keyboard shortcut).
+# Adding a duration later only means adding a line here.
+DURATION_CHOICES = [
+    ("Whole", WHOLE, "1"),
+    ("Half", HALF, "2"),
+    ("Quarter", QUARTER, "3"),
+    ("Eighth", EIGHTH, "4"),
+]
+
+
 
 def step_to_y(step):
     """Convert a staff step to a y position on screen."""
@@ -53,10 +65,11 @@ class StaffWidget(QWidget):
     def __init__(self):
         # __init__ runs once, when the widget is created.
         super().__init__()  # first, let QWidget set itself up
-        # The notes placed so far, as a list of staff steps, e.g. [0, 4, -2].
-        # Only the pitch is stored; where to draw each note is worked out
-        # from its step and its place in the list.
-        self.notes = []
+        # The music being shown. The widget only draws it and edits it;
+        # what a note *is* lives in model.py.
+        self.part = Part()
+        # The duration that the next click will use. The toolbar changes it.
+        self.current_duration = QUARTER
 
     def note_x(self, index):
         """The x position of the note at this place in the list (0 = first)."""
@@ -68,9 +81,10 @@ class StaffWidget(QWidget):
             return
         # Ignore the click if the next note wouldn't fit before the right edge.
         # (Scrolling for longer pieces comes in a later milestone.)
-        if self.note_x(len(self.notes)) > self.width() - MARGIN:
+        if self.note_x(len(self.part.notes)) > self.width() - MARGIN:
             return
-        self.notes.append(y_to_step(event.position().y()))
+        step = y_to_step(event.position().y())
+        self.part.add_note(Note(step, self.current_duration))
         self.update()  # ask Qt to repaint soon; it will call paintEvent
 
     def paintEvent(self, event):
@@ -87,28 +101,61 @@ class StaffWidget(QWidget):
             y = step_to_y(step)
             painter.drawLine(QPointF(MARGIN, y), QPointF(right_edge, y))
 
-        # Draw every note. The whole picture is redrawn from self.notes each
-        # time, so the list is the "truth" and the picture just shows it.
-        painter.setBrush(Qt.black)  # brush = fill color for shapes
+        # Draw every note. The whole picture is redrawn from self.part each
+        # time, so the model is the "truth" and the picture just shows it.
         # enumerate gives each item along with its position: (0, first), (1, second), ...
-        for index, step in enumerate(self.notes):
-            self.draw_quarter_note(painter, self.note_x(index), step)
+        for index, note in enumerate(self.part.notes):
+            self.draw_note(painter, self.note_x(index), note)
 
-    def draw_quarter_note(self, painter, x, step):
-        """Draw a quarter note at horizontal position x on the given staff step."""
-        y = step_to_y(step)
-        self.draw_ledger_lines(painter, x, step)
+    def draw_note(self, painter, x, note):
+        """Draw one note at horizontal position x, shaped by its duration."""
+        y = step_to_y(note.step)
+        self.draw_ledger_lines(painter, x, note.step)
+
+        # Note head: whole and half notes are hollow; shorter notes are filled.
+        # The pen draws outlines; the brush fills the inside.
+        if note.duration >= HALF:
+            painter.setPen(QPen(Qt.black, 1.8))  # thicker outline for hollow heads
+            painter.setBrush(Qt.NoBrush)
+        else:
+            painter.setPen(QPen(Qt.black, 1))
+            painter.setBrush(Qt.black)
         painter.drawEllipse(QPointF(x, y), NOTE_HEAD_WIDTH / 2, NOTE_HEAD_HEIGHT / 2)
+        painter.setPen(QPen(Qt.black, 1))
+
+        if note.duration == WHOLE:
+            return  # whole notes have no stem
 
         # Notation rule: notes below the middle line have stems going up on
         # the right; notes on or above it have stems going down on the left.
-        if step < MIDDLE_LINE_STEP:
+        if note.step < MIDDLE_LINE_STEP:
             stem_x = x + NOTE_HEAD_WIDTH / 2 - 0.5
             stem_end_y = y - STEM_LENGTH
         else:
             stem_x = x - NOTE_HEAD_WIDTH / 2 + 0.5
             stem_end_y = y + STEM_LENGTH
         painter.drawLine(QPointF(stem_x, y), QPointF(stem_x, stem_end_y))
+
+        if note.duration == EIGHTH:
+            self.draw_flag(painter, stem_x, stem_end_y, stem_up=note.step < MIDDLE_LINE_STEP)
+
+    def draw_flag(self, painter, stem_x, stem_end_y, stem_up):
+        """Draw an eighth-note flag: a curve from the end of the stem, to the right."""
+        # The flag curls back toward the note head: down for an up-stem,
+        # up for a down-stem. direction flips the curve's y offsets.
+        direction = 1 if stem_up else -1
+        s = LINE_SPACING
+        path = QPainterPath(QPointF(stem_x, stem_end_y))
+        # A cubic curve: two "pull" points that bend it, then the end point.
+        path.cubicTo(
+            QPointF(stem_x + s * 0.1, stem_end_y + direction * s * 0.9),
+            QPointF(stem_x + s * 1.1, stem_end_y + direction * s * 1.1),
+            QPointF(stem_x + s * 0.7, stem_end_y + direction * s * 2.2),
+        )
+        painter.setPen(QPen(Qt.black, 2))
+        painter.setBrush(Qt.NoBrush)
+        painter.drawPath(path)
+        painter.setPen(QPen(Qt.black, 1))
 
     def draw_ledger_lines(self, painter, x, step):
         """Draw short extra lines for notes above or below the staff."""
@@ -123,12 +170,48 @@ class StaffWidget(QWidget):
             painter.drawLine(QPointF(x - half_width, y), QPointF(x + half_width, y))
 
 
+class MainWindow(QMainWindow):
+    """The application window: a toolbar on top, the staff in the middle.
+
+    QMainWindow already has places for toolbars, menus, and a status bar;
+    we fill them in.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Music Staff")
+
+        self.staff = StaffWidget()
+        self.setCentralWidget(self.staff)  # the staff fills the middle
+
+        toolbar = self.addToolBar("Durations")
+        # A QActionGroup makes its buttons work like radio buttons:
+        # checking one automatically unchecks the others.
+        self.duration_group = QActionGroup(self)
+        for label, duration, shortcut in DURATION_CHOICES:
+            action = QAction(f"{label} ({shortcut})", self)
+            action.setCheckable(True)        # stays pressed in when chosen
+            action.setShortcut(shortcut)     # pressing the key = clicking the button
+            action.setData(duration)         # remember which duration this button means
+            action.setChecked(duration == self.staff.current_duration)
+            self.duration_group.addAction(action)
+            toolbar.addAction(action)
+
+        # Signals and slots: when any button in the group is triggered (clicked
+        # or chosen by its shortcut), Qt calls our method with that button.
+        # "connect" is how we say "when this happens, call that."
+        self.duration_group.triggered.connect(self.on_duration_chosen)
+
+    def on_duration_chosen(self, action):
+        """Slot: called by Qt when a duration button is chosen."""
+        self.staff.current_duration = action.data()
+
+
 def main():
     app = QApplication(sys.argv)  # every Qt program needs exactly one of these
 
-    window = StaffWidget()
-    window.setWindowTitle("Music Staff")
-    window.resize(800, 200)
+    window = MainWindow()
+    window.resize(800, 240)
     window.show()
 
     # Start the event loop: Qt now waits for clicks, key presses, and repaint
