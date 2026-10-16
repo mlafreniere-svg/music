@@ -59,7 +59,7 @@ Tabs for each instrument with a blank staff that can be edited to add notes. Pla
 Completed milestones are marked with ✅.
 
 1. ✅ Set up the environment: install Python, a virtual environment, PySide6, FluidSynth, and a SoundFont. Play one note from a script.
-2. Window with a single staff; click to place quarter notes; draw the notes.
+2. ✅ Window with a single staff; click to place quarter notes; draw the notes.
 3. Note durations palette, rests, delete; the data model (separate from drawing).
 4. Playback with FluidSynth: Play/Pause/Stop, tempo, moving cursor.
 5. Instrument tabs (add/remove), auto clef, mute/solo, multiple parts in sync.
