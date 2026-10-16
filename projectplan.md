@@ -31,7 +31,7 @@ Tabs for each instrument with a blank staff that can be edited to add notes. Pla
 ## Decisions (from requirements interview, 2026-10-16)
 
 - **Purpose:** Learning project. Developer is new to Python. Built step-by-step together in small milestones, with explanations.
-- **Stack:** Python 3.12, PySide6 (Qt) GUI, FluidSynth + General MIDI SoundFont (.sf2) for sound. None of these are installed yet.
+- **Stack:** Python 3.12, PySide6 (Qt) GUI, FluidSynth + General MIDI SoundFont (.sf2) for sound.
 - **Instruments:** Tabs can be added and removed with a "+" button; the instrument comes from a General MIDI list, and repeats are allowed.
 - **Clef:** Set automatically by instrument (treble, bass, or grand staff for piano).
 - **Notation (minimal):** Single-note line; whole, half, quarter, and eighth notes; rests. Fixed key (C) and 4/4 time.
@@ -43,9 +43,22 @@ Tabs for each instrument with a blank staff that can be edited to add notes. Pla
 
 
 
+## Setup
+
+- Python 3.12.10, installed with winget.
+- FluidSynth v2.6.1 in `C:\Users\mason\tools\fluidsynth\fluidsynth-v2.6.1-win10-x64-cpp11\` (its `bin` folder is on the user PATH).
+- SoundFont: GeneralUser GS, saved at `soundfonts\GeneralUser-GS.sf2` (not in git; download from https://github.com/mrbumpy409/GeneralUser-GS).
+- Python packages: `pip install -r requirements.txt` inside the `.venv` virtual environment.
+- Each session: `cd C:\Users\mason\src\music`, then `.venv\Scripts\Activate.ps1`.
+- Test sound: `python play_note.py` should play middle C. The "MIDI in devices" error lines are harmless.
+
+
+
 ## Milestones
 
-1. Set up the environment: install Python, a virtual environment, PySide6, FluidSynth, and a SoundFont. Play one note from a script.
+Completed milestones are marked with ✅.
+
+1. ✅ Set up the environment: install Python, a virtual environment, PySide6, FluidSynth, and a SoundFont. Play one note from a script.
 2. Window with a single staff; click to place quarter notes; draw the notes.
 3. Note durations palette, rests, delete; the data model (separate from drawing).
 4. Playback with FluidSynth: Play/Pause/Stop, tempo, moving cursor.
