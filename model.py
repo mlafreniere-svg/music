@@ -182,6 +182,7 @@ class Score:
     """A whole piece: one Part per instrument, all played together."""
 
     parts: list[Part] = field(default_factory=list)
+    tempo_bpm: int = 100  # beats (quarter notes) per minute; saved with the piece
 
     def is_audible(self, part_index):
         """Should this part be heard, given everyone's Mute and Solo buttons?

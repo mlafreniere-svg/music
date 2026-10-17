@@ -2,20 +2,30 @@
 
 import sys
 from dataclasses import dataclass
+from pathlib import Path
 
-from PySide6.QtCore import QPointF, QRectF, Qt
+from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import (
-    QAction, QActionGroup, QColor, QFont, QFontMetricsF, QPainter, QPainterPath, QPen,
+    QAction, QActionGroup, QColor, QFont, QFontMetricsF, QKeySequence, QPainter,
+    QPainterPath, QPen,
 )
 from PySide6.QtWidgets import (
-    QApplication, QHBoxLayout, QLabel, QMainWindow, QMenu, QSlider, QTabBar, QTabWidget,
-    QToolButton, QWidget,
+    QApplication, QFileDialog, QHBoxLayout, QLabel, QMainWindow, QMenu, QMessageBox,
+    QSlider, QTabBar, QTabWidget, QToolButton, QWidget,
 )
 
 from model import (  # our own model.py
     EIGHTH, HALF, INSTRUMENTS, PIANO, QUARTER, WHOLE, Note, Score,
 )
 from player import MAX_PARTS, PAUSED, PLAYING, STOPPED, Player
+from storage import FILE_EXTENSION, display_name, load_score, save_score
+
+# What the Open and Save dialogs show. Each ";;"-separated entry is one
+# choice in the dialog's file-type dropdown.
+FILE_FILTER = f"Music Staff files (*{FILE_EXTENSION});;All files (*)"
+
+# Where scores are saved by default: a folder inside the project.
+SAVED_MUSIC_FOLDER = Path(__file__).parent / "saved_music"
 
 # Layout measurements, in pixels. Keeping them as named constants (instead of
 # typing numbers everywhere) means one change here updates the whole drawing.
@@ -116,6 +126,8 @@ class StaffWidget(QWidget):
     already do, and we only add the part that's ours, the drawing.
     """
 
+    changed = Signal()  # sent whenever a note is added or removed
+
     def __init__(self, part, settings):
         # __init__ runs once, when the widget is created.
         super().__init__()  # first, let QWidget set itself up
@@ -155,8 +167,10 @@ class StaffWidget(QWidget):
 
     def delete_last_note(self):
         """Remove the last note and redraw."""
-        self.part.remove_last()
-        self.update()
+        if self.part.notes:  # only a real change if there was a note to delete
+            self.part.remove_last()
+            self.update()
+            self.changed.emit()
 
     def mousePressEvent(self, event):
         # Qt calls this automatically whenever the mouse is clicked on us.
@@ -166,6 +180,7 @@ class StaffWidget(QWidget):
             if index is not None:  # "is not None", because index 0 is a real note
                 self.part.remove_note(index)
                 self.update()
+                self.changed.emit()
             return
         if event.button() != Qt.LeftButton:
             return
@@ -179,6 +194,7 @@ class StaffWidget(QWidget):
             step = y_to_step(event.position().y())
         self.part.add_note(Note(step, self.settings.duration))
         self.update()  # ask Qt to repaint soon; it will call paintEvent
+        self.changed.emit()  # tell the window there's something new to save
 
     def paintEvent(self, event):
         # Qt calls paintEvent automatically whenever the widget needs to be
@@ -354,8 +370,8 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Music Staff")
 
+        self.file_path = None           # where the score was last saved; None = never saved
         self.score = Score()            # all the music: one Part per tab
         self.settings = EditSettings()  # shared by every tab's staff
 
@@ -450,7 +466,7 @@ class MainWindow(QMainWindow):
         toolbar.addWidget(QLabel(" Tempo "))  # toolbars can hold any widget, not just buttons
         self.tempo_slider = QSlider(Qt.Horizontal)
         self.tempo_slider.setRange(MIN_TEMPO, MAX_TEMPO)
-        self.tempo_slider.setValue(self.player.tempo_bpm)
+        self.tempo_slider.setValue(self.score.tempo_bpm)
         self.tempo_slider.setFixedWidth(150)
         self.tempo_slider.setFocusPolicy(Qt.NoFocus)  # keep Space for play/pause
         toolbar.addWidget(self.tempo_slider)
@@ -465,6 +481,9 @@ class MainWindow(QMainWindow):
         self.player.note_started.connect(self.on_note_started)
         self.update_transport_buttons(self.player.state)
 
+        self.build_file_menu()
+        self.set_dirty(False)  # a brand-new score has nothing to save yet
+
     # --- Tabs ---------------------------------------------------------------
 
     def current_staff(self):
@@ -474,8 +493,13 @@ class MainWindow(QMainWindow):
     def add_tab(self, instrument):
         """Add a part for this instrument to the score, with a tab to show it."""
         part = self.score.add_part(instrument)
+        self.show_part(part)
+
+    def show_part(self, part):
+        """Make a tab for a part that's already in the score."""
         staff = StaffWidget(part, self.settings)
-        index = self.tabs.addTab(staff, self.unused_tab_label(instrument.name))
+        staff.changed.connect(self.mark_dirty)  # any edit means there's something to save
+        index = self.tabs.addTab(staff, self.unused_tab_label(part.instrument.name))
         self.tabs.tabBar().setTabButton(index, QTabBar.LeftSide, self.make_mute_solo(part))
         self.tabs.setCurrentIndex(index)  # switch to the new tab
         self.refresh_audibility()  # a new part may be silent if another tab is soloed
@@ -546,6 +570,7 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"At most {MAX_PARTS} instruments.", 3000)
             return
         self.add_tab(action.data())
+        self.mark_dirty()
 
     def on_close_tab(self, index):
         """Slot: the x on a tab was clicked."""
@@ -561,6 +586,7 @@ class MainWindow(QMainWindow):
         self.score.remove_part(index)  # keep the score lined up with the tabs
         staff.deleteLater()  # free the widget once Qt is done with it
         self.refresh_audibility()  # closing a soloed tab un-silences the others
+        self.mark_dirty()
 
     # --- Editing ------------------------------------------------------------
 
@@ -611,11 +637,139 @@ class MainWindow(QMainWindow):
 
     def on_tempo_changed(self, bpm):
         """Slot: the tempo slider moved."""
-        self.player.tempo_bpm = bpm  # takes effect from the next note
+        if bpm != self.score.tempo_bpm:  # loading a file sets the slider too; that's no edit
+            self.score.tempo_bpm = bpm  # the player reads it at every note
+            self.mark_dirty()
         self.tempo_label.setText(f" {bpm} BPM ")
+
+    # --- Files --------------------------------------------------------------
+
+    def build_file_menu(self):
+        """The File menu, in the menu bar along the top of the window."""
+        menu = self.menuBar().addMenu("&File")  # & underlines F: Alt+F opens the menu
+        # QKeySequence's standard keys are the usual shortcuts for this computer:
+        # on Windows, New is Ctrl+N, Open is Ctrl+O, Save is Ctrl+S, and so on.
+        for text, shortcut, slot in [
+            ("&New", QKeySequence.New, self.new_file),
+            ("&Open...", QKeySequence.Open, self.open_file),
+            ("&Save", QKeySequence.Save, self.save),
+            ("Save &As...", QKeySequence.SaveAs, self.save_as),
+        ]:
+            action = menu.addAction(text)
+            action.setShortcut(shortcut)
+            action.triggered.connect(slot)
+        menu.addSeparator()
+        menu.addAction("E&xit").triggered.connect(self.close)  # close() runs closeEvent
+
+    def mark_dirty(self):
+        """Slot: the score changed since it was last saved."""
+        self.set_dirty(True)
+
+    def set_dirty(self, dirty):
+        """Remember whether there are unsaved changes, and show it in the title bar."""
+        name = display_name(self.file_path) if self.file_path else "Untitled"
+        # Qt shows "[*]" as "*" when the window is marked modified, and hides it otherwise.
+        self.setWindowTitle(f"{name}[*] - Music Staff")
+        self.setWindowModified(dirty)
+
+    def show_score(self, score, path):
+        """Replace everything on screen with this score (after New or Open)."""
+        self.player.stop()
+        while self.tabs.count():  # remove every old tab
+            staff = self.tabs.widget(0)
+            self.tabs.removeTab(0)
+            staff.deleteLater()
+        self.score = score
+        self.file_path = path
+        if not score.parts:
+            score.add_part(PIANO)  # a score always has at least one instrument
+        for part in score.parts:
+            self.show_part(part)
+        self.tabs.setCurrentIndex(0)
+        self.tempo_slider.setValue(score.tempo_bpm)
+        self.on_tempo_changed(score.tempo_bpm)  # updates the label even if the value didn't change
+        self.set_dirty(False)
+
+    def maybe_save(self):
+        """Before throwing the current score away: offer to save it.
+
+        Returns True if it's OK to go ahead (saved or discarded), False to cancel.
+        """
+        if not self.isWindowModified():
+            return True  # nothing unsaved
+        answer = QMessageBox.question(
+            self,
+            "Unsaved changes",
+            "Save your changes before continuing?",
+            QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel,  # | combines the buttons
+        )
+        if answer == QMessageBox.Save:
+            return self.save()  # False if the user cancels the Save dialog
+        return answer == QMessageBox.Discard
+
+    def new_file(self):
+        if self.maybe_save():
+            self.show_score(Score(), None)
+
+    def open_file(self):
+        if not self.maybe_save():
+            return
+        # getOpenFileName shows the standard Windows Open dialog. It returns the
+        # chosen path (or "" if cancelled) and which filter was used; "_" is
+        # Python's name for a value we don't need.
+        path, _ = QFileDialog.getOpenFileName(self, "Open", self.start_folder(), FILE_FILTER)
+        if not path:
+            return
+        try:
+            score = load_score(path)
+        except (OSError, ValueError) as error:
+            QMessageBox.warning(self, "Couldn't open file", f"{path}\n\n{error}")
+            return
+        self.show_score(score, path)
+
+    def save(self):
+        """Save to the current file, or ask where if it's never been saved.
+
+        Returns True if the score was saved.
+        """
+        if self.file_path is None:
+            return self.save_as()
+        return self.write_file(self.file_path)
+
+    def save_as(self):
+        """Ask for a file name, then save there. Returns True if saved."""
+        path, _ = QFileDialog.getSaveFileName(self, "Save As", self.start_folder(), FILE_FILTER)
+        if not path:
+            return False  # cancelled
+        if not path.endswith(FILE_EXTENSION):
+            path = str(Path(path).with_suffix("")) + FILE_EXTENSION
+        return self.write_file(path)
+
+    def write_file(self, path):
+        try:
+            save_score(self.score, path)
+        except OSError as error:  # e.g. the folder is read-only or the disk is full
+            QMessageBox.warning(self, "Couldn't save file", f"{path}\n\n{error}")
+            return False
+        self.file_path = path
+        self.set_dirty(False)
+        self.statusBar().showMessage(f"Saved {path}", 3000)
+        return True
+
+    def start_folder(self):
+        """Where file dialogs open: next to the current file, else in saved_music."""
+        if self.file_path:
+            return str(Path(self.file_path).parent)
+        # Create the folder if it's missing (e.g. a fresh copy from GitHub).
+        # exist_ok=True: no error if it's already there.
+        SAVED_MUSIC_FOLDER.mkdir(exist_ok=True)
+        return str(SAVED_MUSIC_FOLDER)
 
     def closeEvent(self, event):
         # Qt calls this when the window is about to close: a chance to clean up.
+        if not self.maybe_save():
+            event.ignore()  # the user chose Cancel: keep the window open
+            return
         self.player.close()
         super().closeEvent(event)  # then let QMainWindow finish closing
 

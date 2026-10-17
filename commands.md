@@ -49,6 +49,7 @@ python main.py                   # run the app
 | `cd ..` | Go up one folder. |
 | `cd ~` | Go to your home folder (`C:\Users\mason`). |
 | `mkdir <name>` | Make a new folder. |
+| `del <file>` | ⚠️ Delete a file. It skips the Recycle Bin, so it can't be undone. |
 | `cls` | Clear the screen. |
 | `exit` | Close the terminal. |
 | `notepad <file>` | Open a file in Notepad, e.g. `notepad main.py`. |
@@ -134,6 +135,13 @@ Keyboard shortcuts inside the app:
 | `Backspace` | Delete the last note. |
 | `Space` | Play / pause. After a pause, it resumes from the same spot. |
 | `Esc` | Stop and go back to the beginning. |
+| `Ctrl+N` | New score (asks first if there are unsaved changes). |
+| `Ctrl+O` | Open a saved score (`.music.json`). |
+| `Ctrl+S` | Save. The first time, it asks for a file name. |
+| `Ctrl+Shift+S` | Save As: save under a new name. |
+| `Alt+F` | Open the File menu. |
+
+A `*` after the name in the title bar means there are unsaved changes.
 | Right-click a note | Delete that note. |
 
 
@@ -166,6 +174,8 @@ Run the tests after every change. If something fails, pytest shows the failing l
 | `git log --oneline` | List past commits, one per line. |
 | `git show <id>` | Show what a specific commit changed. |
 | `git restore <file>` | ⚠️ Throw away uncommitted changes to a file and go back to the last commit. Can't be undone. |
+| `git status --untracked-files=all` | Like `git status`, but lists every new file inside new folders too. |
+| `git check-ignore -v <file>` | Is this file ignored, and by which `.gitignore` line? (No output = not ignored.) |
 | `git ls-files --eol` | Show each file's line endings (`lf`/`crlf`) in git (`i/`) and on disk (`w/`). |
 
 The usual cycle: edit files, then `git status`, `git diff`, `git add ...`, `git commit -m "..."`, `git push`.
@@ -197,7 +207,9 @@ Branch names like `fix/1-quiet-playback` say the kind of work, the issue number,
 The branch cycle: `git switch -c fix/...`, edit and commit, then `git switch main`, `git merge fix/...`, `git push`, `git branch -d fix/...`.
 
 Special files:
-- `.gitignore` lists files git should never track (`.venv`, SoundFonts).
+- `.gitignore` lists files git should never track (`.venv`, SoundFonts, saved songs in `saved_music\`).
+  A line starting with `!` makes an exception, e.g. `!saved_music/.gitkeep`.
+- `.gitkeep` is an empty placeholder file. Git only tracks files, not empty folders, so this keeps the folder in the repo.
 - `.gitattributes` sets how git treats files. Here it keeps LF line endings, so the "LF will be replaced by CRLF" warnings stop.
 
 Used once to set up:
@@ -240,6 +252,7 @@ Putting `Fixes #1` in a commit message closes issue #1 automatically when that c
 | `commit: command not found` | Git commands start with `git`: `git commit ...`. (And to upload commits, use `git push`.) |
 | `fatal: pathspec 'status' did not match any files` | Two commands got combined (`git add status`). Git read `status` as a file name. Run `git status` and `git add <files>` separately. |
 | `git: 'switch-c' is not a git command` | A missing space: `git switch -c <name>`. |
+| `git: 'add.' is not a git command` | A missing space: `git add .` (the `.` is a separate word). |
 | `warning: ... LF will be replaced by CRLF` | Harmless. Fixed for good by `.gitattributes`. |
 | `/usr/bin/bash: ... unexpected EOF while looking for matching` | A message to Claude was sent with `!` and ran as a command. Leave off the `!`. |
 | `/usr/bin/bash: line 1: gh: command not found` | Claude Code started before gh was on PATH. Use the full path (see "Two shells"), or restart Claude Code. |

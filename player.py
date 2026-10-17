@@ -39,7 +39,6 @@ class Player(QObject):
 
     def __init__(self):
         super().__init__()
-        self.tempo_bpm = 100  # beats (quarter notes) per minute
 
         self.synth = fluidsynth.Synth(gain=GAIN)  # pyfluidsynth's default, 0.2, is too quiet
         # Open only the audio output. (Synth.start() would also open a MIDI
@@ -162,7 +161,7 @@ class Player(QObject):
         # was handled a few milliseconds late, the next wait is shorter, so
         # small delays never add up. Counting in beats (not seconds) means a
         # tempo change applies from the next event on.
-        seconds_per_beat = 60 / self.tempo_bpm
+        seconds_per_beat = 60 / self.score.tempo_bpm  # read every time, so slider changes apply
         next_beat = self.events[self.event_index].beat
         self.next_start_time += (next_beat - beat) * seconds_per_beat
         wait_seconds = self.next_start_time - time.perf_counter()
