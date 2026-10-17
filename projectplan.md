@@ -62,7 +62,7 @@ Completed milestones are marked with ✅.
 2. ✅ Window with a single staff; click to place quarter notes; draw the notes.
 3. ✅ Note durations palette, rests, delete; the data model (separate from drawing).
 4. ✅ Playback with FluidSynth: Play/Pause/Stop, tempo, moving cursor.
-5. Instrument tabs (add/remove), auto clef, mute/solo, multiple parts in sync.
+5. ✅ Instrument tabs (add/remove), auto clef, mute/solo, multiple parts in sync.
 6. Save/load JSON.
 7. Undo/redo, dragging notes, pitch preview, scrolling as measures are added.
 

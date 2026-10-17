@@ -8,13 +8,14 @@ from PySide6.QtGui import (
     QAction, QActionGroup, QColor, QFont, QFontMetricsF, QPainter, QPainterPath, QPen,
 )
 from PySide6.QtWidgets import (
-    QApplication, QLabel, QMainWindow, QMenu, QSlider, QTabWidget, QToolButton, QWidget,
+    QApplication, QHBoxLayout, QLabel, QMainWindow, QMenu, QSlider, QTabBar, QTabWidget,
+    QToolButton, QWidget,
 )
 
 from model import (  # our own model.py
     EIGHTH, HALF, INSTRUMENTS, PIANO, QUARTER, WHOLE, Note, Score,
 )
-from player import PAUSED, PLAYING, STOPPED, Player
+from player import MAX_PARTS, PAUSED, PLAYING, STOPPED, Player
 
 # Layout measurements, in pixels. Keeping them as named constants (instead of
 # typing numbers everywhere) means one change here updates the whole drawing.
@@ -53,6 +54,18 @@ DURATION_CHOICES = [
 # Playback cursor: a see-through band behind the note that's playing.
 # QColor(red, green, blue, alpha): alpha 0 is invisible, 255 is solid.
 CURSOR_COLOR = QColor(70, 130, 230, 60)
+
+# Staffs are drawn in INK; parts that are silenced by Mute/Solo in DIMMED_INK.
+INK = QColor(0, 0, 0)
+DIMMED_INK = QColor(170, 170, 170)
+
+# Colors for the Mute and Solo buttons when they're switched on. This is a
+# Qt "style sheet": the same idea as CSS on web pages.
+MUTE_SOLO_STYLE = """
+QToolButton { padding: 0px 3px; font-weight: bold; }
+QToolButton#mute:checked { background: #e05050; color: white; }
+QToolButton#solo:checked { background: #f0c030; color: black; }
+"""
 
 # Clef symbols are characters in the "Segoe UI Symbol" font that comes with
 # Windows. \U0001D11E is the character's Unicode number (its ID in a
@@ -113,6 +126,13 @@ class StaffWidget(QWidget):
         self.settings = settings
         # The index of the note being played, or None when nothing is playing.
         self.playing_index = None
+        # The color everything is drawn in; gray when Mute/Solo silences this part.
+        self.ink = INK
+
+    def set_dimmed(self, dimmed):
+        """Draw the staff in gray (dimmed=True) or black."""
+        self.ink = DIMMED_INK if dimmed else INK
+        self.update()
 
     def set_playing_index(self, index):
         """Slot: move the playback cursor to this note (None hides it)."""
@@ -175,7 +195,7 @@ class StaffWidget(QWidget):
             bottom = step_to_y(LOWEST_STEP - 2)
             painter.fillRect(QRectF(x - NOTE_SPACING / 2, top, NOTE_SPACING, bottom - top), CURSOR_COLOR)
 
-        painter.setPen(QPen(Qt.black, 1))
+        painter.setPen(QPen(self.ink, 1))
 
         right_edge = self.width() - MARGIN
         for step in range(0, TOP_LINE_STEP + 1, 2):  # steps 0, 2, 4, 6, 8
@@ -191,7 +211,7 @@ class StaffWidget(QWidget):
 
         # Bar lines: the model says where measures end; we draw a line
         # halfway between that note and the next one.
-        painter.setPen(QPen(Qt.black, 1))
+        painter.setPen(QPen(self.ink, 1))
         for index in self.part.measure_ends():
             x = self.note_x(index) + NOTE_SPACING / 2
             painter.drawLine(QPointF(x, step_to_y(TOP_LINE_STEP)), QPointF(x, step_to_y(0)))
@@ -230,13 +250,13 @@ class StaffWidget(QWidget):
         # Note head: whole and half notes are hollow; shorter notes are filled.
         # The pen draws outlines; the brush fills the inside.
         if note.duration >= HALF:
-            painter.setPen(QPen(Qt.black, 1.8))  # thicker outline for hollow heads
+            painter.setPen(QPen(self.ink, 1.8))  # thicker outline for hollow heads
             painter.setBrush(Qt.NoBrush)
         else:
-            painter.setPen(QPen(Qt.black, 1))
-            painter.setBrush(Qt.black)
+            painter.setPen(QPen(self.ink, 1))
+            painter.setBrush(self.ink)
         painter.drawEllipse(QPointF(x, y), NOTE_HEAD_WIDTH / 2, NOTE_HEAD_HEIGHT / 2)
-        painter.setPen(QPen(Qt.black, 1))
+        painter.setPen(QPen(self.ink, 1))
 
         if note.duration == WHOLE:
             return  # whole notes have no stem
@@ -267,10 +287,10 @@ class StaffWidget(QWidget):
             QPointF(stem_x + s * 1.1, stem_end_y + direction * s * 1.1),
             QPointF(stem_x + s * 0.7, stem_end_y + direction * s * 2.2),
         )
-        painter.setPen(QPen(Qt.black, 2))
+        painter.setPen(QPen(self.ink, 2))
         painter.setBrush(Qt.NoBrush)
         painter.drawPath(path)
-        painter.setPen(QPen(Qt.black, 1))
+        painter.setPen(QPen(self.ink, 1))
 
     def draw_rest(self, painter, x, duration):
         """Draw the rest symbol for this duration, centered at horizontal position x.
@@ -282,12 +302,12 @@ class StaffWidget(QWidget):
         if duration == WHOLE:
             # A block hanging down from the 4th line (step 6).
             painter.setPen(Qt.NoPen)
-            painter.setBrush(Qt.black)
+            painter.setBrush(self.ink)
             painter.drawRect(QRectF(x - s * 0.5, step_to_y(6), s, s * 0.5))
         elif duration == HALF:
             # A block sitting on top of the middle line (step 4).
             painter.setPen(Qt.NoPen)
-            painter.setBrush(Qt.black)
+            painter.setBrush(self.ink)
             painter.drawRect(QRectF(x - s * 0.5, step_to_y(4) - s * 0.5, s, s * 0.5))
         elif duration == QUARTER:
             # A thick zig-zag with a small hook at the bottom.
@@ -296,21 +316,21 @@ class StaffWidget(QWidget):
             path.lineTo(x - s * 0.25, step_to_y(4))
             path.lineTo(x + s * 0.25, step_to_y(2.5))
             path.quadTo(QPointF(x - s * 0.55, step_to_y(2.4)), QPointF(x + s * 0.05, step_to_y(1)))
-            painter.setPen(QPen(Qt.black, s * 0.2, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            painter.setPen(QPen(self.ink, s * 0.2, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
             painter.setBrush(Qt.NoBrush)
             painter.drawPath(path)
         elif duration == EIGHTH:
             # A dot, a small curl to the right, then a slanted stroke down-left.
             painter.setPen(Qt.NoPen)
-            painter.setBrush(Qt.black)
+            painter.setBrush(self.ink)
             painter.drawEllipse(QPointF(x - s * 0.25, step_to_y(5)), s * 0.18, s * 0.18)
             path = QPainterPath(QPointF(x - s * 0.25, step_to_y(4.7)))
             path.quadTo(QPointF(x + s * 0.1, step_to_y(4.5)), QPointF(x + s * 0.35, step_to_y(5.3)))
             path.lineTo(x - s * 0.05, step_to_y(2))
-            painter.setPen(QPen(Qt.black, 1.6))
+            painter.setPen(QPen(self.ink, 1.6))
             painter.setBrush(Qt.NoBrush)
             painter.drawPath(path)
-        painter.setPen(QPen(Qt.black, 1))  # put the normal pen back for whatever is drawn next
+        painter.setPen(QPen(self.ink, 1))  # put the normal pen back for whatever is drawn next
 
     def draw_ledger_lines(self, painter, x, step):
         """Draw short extra lines for notes above or below the staff."""
@@ -338,7 +358,6 @@ class MainWindow(QMainWindow):
 
         self.score = Score()            # all the music: one Part per tab
         self.settings = EditSettings()  # shared by every tab's staff
-        self.playing_staff = None       # the staff whose part is playing, if any
 
         # The tabs. Tab number i always shows score.parts[i]: tabs can't be
         # dragged into a new order, so the two lists stay lined up.
@@ -457,7 +476,54 @@ class MainWindow(QMainWindow):
         part = self.score.add_part(instrument)
         staff = StaffWidget(part, self.settings)
         index = self.tabs.addTab(staff, self.unused_tab_label(instrument.name))
+        self.tabs.tabBar().setTabButton(index, QTabBar.LeftSide, self.make_mute_solo(part))
         self.tabs.setCurrentIndex(index)  # switch to the new tab
+        self.refresh_audibility()  # a new part may be silent if another tab is soloed
+
+    def make_mute_solo(self, part):
+        """Build the small M / S buttons that sit on the left side of a tab."""
+        mute = QToolButton()
+        mute.setText("M")
+        mute.setToolTip("Mute: silence this instrument")  # shown when the mouse hovers
+        mute.setObjectName("mute")  # the name the style sheet's #mute refers to
+        solo = QToolButton()
+        solo.setText("S")
+        solo.setToolTip("Solo: play only the soloed instruments")
+        solo.setObjectName("solo")
+        for button in (mute, solo):
+            button.setCheckable(True)
+            button.setFocusPolicy(Qt.NoFocus)  # keep Space for play/pause
+
+        # Each button needs to know which part it controls. A lambda is a
+        # tiny function written in place; "part=part" stores this tab's part
+        # inside it, so every tab's buttons control their own part.
+        mute.toggled.connect(lambda checked, part=part: self.set_mute(part, checked))
+        solo.toggled.connect(lambda checked, part=part: self.set_solo(part, checked))
+
+        # A small container widget holding the two buttons side by side.
+        box = QWidget()
+        box.setStyleSheet(MUTE_SOLO_STYLE)
+        layout = QHBoxLayout(box)  # a layout arranges widgets in a row
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(1)
+        layout.addWidget(mute)
+        layout.addWidget(solo)
+        return box
+
+    def set_mute(self, part, muted):
+        part.muted = muted
+        self.player.apply_mutes()
+        self.refresh_audibility()
+
+    def set_solo(self, part, soloed):
+        part.soloed = soloed
+        self.player.apply_mutes()
+        self.refresh_audibility()
+
+    def refresh_audibility(self):
+        """Gray out every staff that Mute/Solo has silenced."""
+        for index, staff in enumerate(self.all_staffs()):
+            staff.set_dimmed(not self.score.is_audible(index))
 
     def unused_tab_label(self, name):
         """A tab label not already in use: "Violin", else "Violin 2", "Violin 3", ..."""
@@ -469,22 +535,32 @@ class MainWindow(QMainWindow):
             label = f"{name} {number}"
         return label
 
+    def all_staffs(self):
+        """Every tab's staff, in tab order."""
+        return [self.tabs.widget(i) for i in range(self.tabs.count())]
+
     def on_add_instrument(self, action):
         """Slot: an instrument was chosen from the "+ Instrument" menu."""
+        if len(self.score.parts) >= MAX_PARTS:
+            # The status bar is the strip along the bottom of the window.
+            self.statusBar().showMessage(f"At most {MAX_PARTS} instruments.", 3000)
+            return
         self.add_tab(action.data())
 
     def on_close_tab(self, index):
         """Slot: the x on a tab was clicked."""
         if self.tabs.count() == 1:
-            # The status bar is the strip along the bottom of the window.
             self.statusBar().showMessage("A score needs at least one instrument.", 3000)
             return
+        if self.player.state != STOPPED:
+            # Removing a part renumbers the ones after it, which would mix up
+            # the player's part numbers. Stopping first keeps things simple.
+            self.player.stop()
         staff = self.tabs.widget(index)
-        if staff is self.playing_staff:
-            self.player.stop()  # don't keep playing a part that's being removed
         self.tabs.removeTab(index)
         self.score.remove_part(index)  # keep the score lined up with the tabs
         staff.deleteLater()  # free the widget once Qt is done with it
+        self.refresh_audibility()  # closing a soloed tab un-silences the others
 
     # --- Editing ------------------------------------------------------------
 
@@ -503,15 +579,14 @@ class MainWindow(QMainWindow):
     # --- Playback -----------------------------------------------------------
 
     def on_play(self):
-        """Slot: play the open tab, or resume if paused."""
-        if self.player.state != PAUSED:
-            self.playing_staff = self.current_staff()
-        self.player.play(self.playing_staff.part)
+        """Slot: play every tab together, or resume if paused."""
+        self.player.play(self.score)
 
-    def on_note_started(self, index):
-        """Slot: move the cursor on the staff that's playing."""
-        if self.playing_staff is not None:
-            self.playing_staff.set_playing_index(index)
+    def on_note_started(self, part_index, note_index):
+        """Slot: move the cursor on that part's tab."""
+        staff = self.tabs.widget(part_index)  # tab i shows score.parts[i]
+        if staff is not None:
+            staff.set_playing_index(note_index)
 
     def on_play_pause(self):
         """Slot for Space: pause if playing, otherwise play."""
@@ -530,9 +605,9 @@ class MainWindow(QMainWindow):
         self.stop_action.setEnabled(state in (PLAYING, PAUSED))
         # "Play" means "Resume" while paused; the label says so.
         self.play_action.setText("Resume" if state == PAUSED else "Play")
-        if state == STOPPED and self.playing_staff is not None:
-            self.playing_staff.set_playing_index(None)  # hide the cursor
-            self.playing_staff = None
+        if state == STOPPED:
+            for staff in self.all_staffs():
+                staff.set_playing_index(None)  # hide every cursor
 
     def on_tempo_changed(self, bpm):
         """Slot: the tempo slider moved."""

@@ -1,7 +1,7 @@
-"""Playback: turns a Part into sound through FluidSynth.
+"""Playback: turns a Score into sound through FluidSynth.
 
 The Player is a QObject so it can use a Qt timer and send signals (for
-example "now playing note 3") that the window can listen to.
+example "part 1 just started its note 3") that the window can listen to.
 """
 
 import time
@@ -12,10 +12,14 @@ from PySide6.QtCore import QObject, Qt, QTimer, Signal
 
 SOUNDFONT = Path(__file__).parent / "soundfonts" / "GeneralUser-GS.sf2"
 
-CHANNEL = 0     # MIDI channel; milestone 5 gives each instrument its own
 VELOCITY = 100  # how hard each key is struck, 0-127
-PIANO = 0       # General MIDI program number for Acoustic Grand Piano
 GAIN = 0.6      # master volume, 0-10; above ~1 notes played together can distort
+
+# MIDI has 16 channels, 0-15. Each part gets its own channel so it can have
+# its own instrument sound. Channel 9 is reserved for drums in General MIDI,
+# so we skip it, leaving 15 channels: at most 15 parts.
+CHANNELS = [c for c in range(16) if c != 9]
+MAX_PARTS = len(CHANNELS)
 
 
 # The player is always in exactly one of these states.
@@ -25,13 +29,13 @@ PAUSED = "paused"
 
 
 class Player(QObject):
-    """Plays the notes of a part, one after another, at a given tempo."""
+    """Plays all the parts of a score together, at a given tempo."""
 
     # Signals this object can send. Other code connects to them, like the
-    # toolbar buttons' signals. Signal(int) means it sends one whole number.
-    note_started = Signal(int)  # the index of the note that just started
-    finished = Signal()         # the part reached its end
-    state_changed = Signal(str) # the new state: STOPPED, PLAYING, or PAUSED
+    # toolbar buttons' signals. Signal(int, int) sends two whole numbers.
+    note_started = Signal(int, int)  # (part index, note index) of a note that just started
+    finished = Signal()              # the score reached its end
+    state_changed = Signal(str)      # the new state: STOPPED, PLAYING, or PAUSED
 
     def __init__(self):
         super().__init__()
@@ -46,113 +50,146 @@ class Player(QObject):
             self.synth.settings, self.synth.synth
         )
         self.soundfont_id = self.synth.sfload(str(SOUNDFONT))
-        self.synth.program_select(CHANNEL, self.soundfont_id, 0, PIANO)
 
         # A single-shot timer fires once, after the delay we give it.
         # PreciseTimer asks Windows for millisecond accuracy.
         self.timer = QTimer(self)
         self.timer.setSingleShot(True)
         self.timer.setTimerType(Qt.PreciseTimer)
-        self.timer.timeout.connect(self.play_next_note)
+        self.timer.timeout.connect(self.play_next_events)
 
         self.state = STOPPED
-        self.notes = []            # what's being played
-        self.clef = "treble"
-        self.index = 0             # which note plays next
-        self.sounding_pitch = None # the MIDI pitch currently held down, if any
-        self.next_start_time = 0.0 # when the next note should begin (seconds)
-        self.paused_pitch = None   # the note that was sounding when we paused
-        self.time_left = 0.0       # seconds left on that note when we paused
+        self.score = None          # the score being played (for Mute/Solo)
+        self.events = []           # the score's timeline (see Score.timeline)
+        self.event_index = 0       # the next event to handle
+        self.sounding = set()      # (channel, pitch) pairs currently held down
+        self.next_start_time = 0.0 # when the next event is due (seconds)
+        self.paused_sounding = set() # what was sounding when we paused
+        self.time_left = 0.0       # seconds until the next event, when we paused
 
     def set_state(self, state):
         """Change state and tell anyone listening (the window's buttons)."""
         self.state = state
         self.state_changed.emit(state)
 
-    def play(self, part):
-        """Resume if paused; otherwise start the part from the beginning."""
+    def play(self, score):
+        """Resume if paused; otherwise start the whole score from the beginning."""
         if self.state == PAUSED:
             self.resume()
             return
         self.stop()
-        # Copy the list, so editing the staff during playback can't change
-        # what's being played halfway through.
-        self.notes = list(part.notes)
-        self.clef = part.clef  # the same staff step is a different pitch in each clef
-        # Switch the channel to this part's instrument sound ("program").
-        self.synth.program_select(CHANNEL, self.soundfont_id, 0, part.instrument.program)
-        self.index = 0
+        # Keep the score itself (not a copy) so Mute/Solo changes made during
+        # playback are seen right away.
+        self.score = score
+        # The timeline is a new list built from the score right now, so
+        # editing the staff during playback can't change what's being played.
+        self.events = score.timeline()
+        self.event_index = 0
+        # Give each part's channel that part's instrument sound ("program").
+        for part_index, part in enumerate(score.parts):
+            channel = CHANNELS[part_index]
+            self.synth.program_select(channel, self.soundfont_id, 0, part.instrument.program)
+        if not self.events:
+            return  # nothing written yet
         # perf_counter() is a high-precision clock, in seconds. Only the
         # differences between its readings matter.
         self.next_start_time = time.perf_counter()
         self.set_state(PLAYING)
-        self.play_next_note()
+        self.play_next_events()
 
     def pause(self):
-        """Freeze playback where it is, remembering how far into the note we were."""
+        """Freeze playback where it is, remembering what was sounding."""
         if self.state != PLAYING:
             return
         self.timer.stop()
         self.time_left = max(0.0, self.next_start_time - time.perf_counter())
-        self.paused_pitch = self.sounding_pitch
-        self.release_note()
+        self.paused_sounding = set(self.sounding)  # a copy, since release_all empties it
+        self.release_all()
         self.set_state(PAUSED)
 
     def resume(self):
-        """Continue after a pause: finish the paused note, then carry on."""
+        """Continue after a pause: re-sound the held notes, then carry on."""
         if self.state != PAUSED:
             return
-        # Re-sound the note that was cut off, for the time it had left.
-        if self.paused_pitch is not None:
-            self.synth.noteon(CHANNEL, self.paused_pitch, VELOCITY)
-            self.sounding_pitch = self.paused_pitch
-        # Shift the schedule: the next note is due time_left seconds from *now*.
+        for channel, pitch in self.paused_sounding:
+            if self.is_audible(CHANNELS.index(channel)):  # it may have been muted meanwhile
+                self.synth.noteon(channel, pitch, VELOCITY)
+                self.sounding.add((channel, pitch))
+        # Shift the schedule: the next event is due time_left seconds from *now*.
         self.next_start_time = time.perf_counter() + self.time_left
         self.timer.start(round(self.time_left * 1000))
         self.set_state(PLAYING)
 
     def stop(self):
-        """Stop playing, silence the current note, and go back to the start."""
+        """Stop playing, silence everything, and go back to the start."""
         self.timer.stop()
-        self.release_note()
-        self.index = 0
+        self.release_all()
+        self.event_index = 0
         if self.state != STOPPED:
             self.set_state(STOPPED)
 
-    def play_next_note(self):
-        """Play one note, then set the timer for the one after it.
+    def play_next_events(self):
+        """Handle every event due at the current beat, then set the timer.
 
-        Called by play() for the first note, then by the timer for each
-        following note: the timer "chains" the notes together.
+        Called by play() for the first beat, then by the timer: the timer
+        "chains" the beats together, just as it chained notes before.
         """
-        self.release_note()  # let go of the previous note
-        if self.index >= len(self.notes):
+        beat = self.events[self.event_index].beat
+        # Handle all the events at this beat. Endings come first in the
+        # timeline, so a note is released before a new one starts.
+        while self.event_index < len(self.events) and self.events[self.event_index].beat == beat:
+            event = self.events[self.event_index]
+            channel = CHANNELS[event.part_index]
+            if event.starts:
+                # Rests make no sound, and neither do muted parts. The cursor
+                # still moves either way (note_started below).
+                if event.pitch is not None and self.is_audible(event.part_index):
+                    self.synth.noteon(channel, event.pitch, VELOCITY)
+                    self.sounding.add((channel, event.pitch))
+                self.note_started.emit(event.part_index, event.note_index)
+            elif event.pitch is not None:
+                self.synth.noteoff(channel, event.pitch)
+                self.sounding.discard((channel, event.pitch))  # discard: remove if present
+            self.event_index += 1
+
+        if self.event_index >= len(self.events):
             self.stop()
             self.finished.emit()  # emit = send the signal
             return
 
-        note = self.notes[self.index]
-        pitch = note.midi_pitch(self.clef)
-        if pitch is not None:  # rests make no sound
-            self.synth.noteon(CHANNEL, pitch, VELOCITY)
-            self.sounding_pitch = pitch
-        self.note_started.emit(self.index)
-
-        # Drift-free scheduling: work out when the next note *should* start,
-        # then wait only for whatever time is left until then. If this note
-        # started a few milliseconds late, the next wait is shorter, so small
-        # delays never add up.
+        # Drift-free scheduling: work out when the next event *should* happen,
+        # then wait only for whatever time is left until then. If this beat
+        # was handled a few milliseconds late, the next wait is shorter, so
+        # small delays never add up. Counting in beats (not seconds) means a
+        # tempo change applies from the next event on.
         seconds_per_beat = 60 / self.tempo_bpm
-        self.next_start_time += note.duration * seconds_per_beat
-        self.index += 1
+        next_beat = self.events[self.event_index].beat
+        self.next_start_time += (next_beat - beat) * seconds_per_beat
         wait_seconds = self.next_start_time - time.perf_counter()
         self.timer.start(max(0, round(wait_seconds * 1000)))  # in milliseconds
 
-    def release_note(self):
-        """Stop the note that is sounding, if there is one."""
-        if self.sounding_pitch is not None:
-            self.synth.noteoff(CHANNEL, self.sounding_pitch)
-            self.sounding_pitch = None
+    def is_audible(self, part_index):
+        """Should this part be heard right now (Mute/Solo)?"""
+        if self.score is None or part_index >= len(self.score.parts):
+            return False
+        return self.score.is_audible(part_index)
+
+    def apply_mutes(self):
+        """Silence held notes of parts that were just muted (or un-soloed).
+
+        Call this whenever a Mute or Solo button changes. A part that's
+        un-muted is heard again from its next note.
+        """
+        for channel, pitch in list(self.sounding):  # a copy: we change the set inside the loop
+            if not self.is_audible(CHANNELS.index(channel)):
+                self.synth.noteoff(channel, pitch)
+                self.sounding.discard((channel, pitch))
+
+    def release_all(self):
+        """Stop every note that is sounding."""
+        for channel, pitch in self.sounding:
+            self.synth.noteoff(channel, pitch)
+        self.sounding.clear()
 
     def close(self):
         """Shut the synthesizer down. Call once, when the app exits."""

@@ -140,3 +140,76 @@ def test_score_add_and_remove_parts():
     assert violin is score.parts[0]  # add_part returns the very part it added
     score.remove_part(0)
     assert [p.instrument.name for p in score.parts] == ["Cello"]
+
+
+# --- Mute and solo -------------------------------------------------------
+
+def make_trio():
+    """A helper (not a test: no test_ prefix) that builds a 3-part score."""
+    score = Score()
+    for name in ["Violin", "Flute", "Cello"]:
+        score.add_part(find_instrument(name))
+    return score
+
+
+def audible(score):
+    return [score.is_audible(i) for i in range(len(score.parts))]
+
+
+def test_everyone_plays_by_default():
+    assert audible(make_trio()) == [True, True, True]
+
+
+def test_mute_silences_one_part():
+    score = make_trio()
+    score.parts[1].muted = True
+    assert audible(score) == [True, False, True]
+
+
+def test_solo_plays_only_soloed_parts():
+    score = make_trio()
+    score.parts[0].soloed = True
+    score.parts[2].soloed = True
+    assert audible(score) == [True, False, True]
+
+
+def test_solo_wins_over_mute():
+    score = make_trio()
+    score.parts[0].muted = True
+    score.parts[0].soloed = True
+    assert audible(score) == [True, False, False]
+
+
+# --- Timeline ------------------------------------------------------------
+
+def test_timeline_merges_parts_in_beat_order():
+    score = Score()
+    violin = score.add_part(find_instrument("Violin"))
+    cello = score.add_part(find_instrument("Cello"))
+    violin.notes = [Note(0), Note(1)]   # two quarters: beats 0 and 1
+    cello.notes = [Note(0, HALF)]       # one half note: beats 0-2
+    starts = [(e.beat, e.part_index, e.note_index) for e in score.timeline() if e.starts]
+    assert starts == [(0.0, 0, 0), (0.0, 1, 0), (1.0, 0, 1)]
+
+
+def test_timeline_pitches_use_each_parts_clef():
+    score = Score()
+    score.add_part(find_instrument("Violin")).add_note(Note(0))
+    score.add_part(find_instrument("Cello")).add_note(Note(0))
+    pitches = [e.pitch for e in score.timeline() if e.starts]
+    assert pitches == [64, 43]  # E4 in treble, G2 in bass
+
+
+def test_timeline_ends_come_before_starts_at_the_same_beat():
+    score = Score()
+    score.add_part(PIANO).notes = [Note(0), Note(0)]  # the same note twice
+    kinds = [(e.beat, e.starts) for e in score.timeline()]
+    assert kinds == [(0.0, True), (1.0, False), (1.0, True), (2.0, False)]
+
+
+def test_timeline_includes_rests():
+    score = Score()
+    score.add_part(PIANO).notes = [Note(None, HALF), Note(0)]
+    events = score.timeline()
+    assert events[0].pitch is None              # the rest still gets events,
+    assert events[-1].beat == 3.0               # so the piece lasts 2 + 1 beats

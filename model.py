@@ -126,6 +126,8 @@ class Part:
     notes: list[Note] = field(default_factory=list)
     # Sharing one Instrument is fine (unlike a list), because it's frozen.
     instrument: Instrument = PIANO
+    muted: bool = False   # Mute: silence this part
+    soloed: bool = False  # Solo: play only the soloed parts
 
     @property
     def clef(self):
@@ -164,11 +166,54 @@ class Part:
         return ends
 
 
+@dataclass(frozen=True)
+class Event:
+    """One moment in a performance: a note starting or ending."""
+
+    beat: float       # when it happens, counted in beats from the start
+    starts: bool      # True: the note begins here; False: it ends here
+    part_index: int   # which part (tab) the note belongs to
+    note_index: int   # which note in that part
+    pitch: int | None # MIDI pitch, or None for a rest
+
+
 @dataclass
 class Score:
     """A whole piece: one Part per instrument, all played together."""
 
     parts: list[Part] = field(default_factory=list)
+
+    def is_audible(self, part_index):
+        """Should this part be heard, given everyone's Mute and Solo buttons?
+
+        If any part is soloed, only soloed parts play (solo wins over mute).
+        Otherwise, every part plays except the muted ones.
+        """
+        part = self.parts[part_index]
+        # any(...) is True if at least one item is True.
+        if any(p.soloed for p in self.parts):
+            return part.soloed
+        return not part.muted
+
+    def timeline(self):
+        """Every note's start and end in every part, as one list sorted by beat.
+
+        This is how the parts play "together": the player walks through one
+        list instead of juggling separate ones.
+        """
+        events = []
+        for part_index, part in enumerate(self.parts):
+            beat = 0.0
+            for note_index, note in enumerate(part.notes):
+                pitch = note.midi_pitch(part.clef)
+                events.append(Event(beat, True, part_index, note_index, pitch))
+                beat += note.duration
+                events.append(Event(beat, False, part_index, note_index, pitch))
+        # Sort by beat. At the same beat, endings (starts=False) come before
+        # beginnings (starts=True), because False sorts before True. So a
+        # repeated note is released before it's played again.
+        events.sort(key=lambda event: (event.beat, event.starts))
+        return events
 
     def add_part(self, instrument):
         """Add an empty part for this instrument and return it."""
