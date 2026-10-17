@@ -11,8 +11,9 @@ from PySide6.QtGui import (
     QPainterPath, QPen, QUndoStack,
 )
 from PySide6.QtWidgets import (
-    QApplication, QComboBox, QFileDialog, QHBoxLayout, QLabel, QMainWindow, QMenu, QMessageBox,
-    QScrollArea, QSlider, QTabBar, QTabWidget, QToolButton, QVBoxLayout, QWidget,
+    QApplication, QComboBox, QDialog, QFileDialog, QHBoxLayout, QLabel, QMainWindow, QMenu,
+    QMessageBox, QScrollArea, QSlider, QTabBar, QTabWidget, QTextBrowser, QToolButton,
+    QVBoxLayout, QWidget,
 )
 
 from model import (  # our own model.py
@@ -22,9 +23,10 @@ from model import (  # our own model.py
 )
 from edits import (
     AddNote, AddPart, ChangeInstrument, ChangeKey, ChangeTempo, ChangeTimeSignature,
-    RemoveNote, RemovePart, SetNotePitch,
+    RemoveNote, RemovePart, SetHeads,
 )
 from midi_export import export_midi
+from pdf_export import Section, export_pdf
 from player import MAX_PARTS, PAUSED, PLAYING, STOPPED, Player
 from storage import FILE_EXTENSION, display_name, load_score, save_score
 
@@ -105,6 +107,8 @@ CLEF_BOTTOM_STEP = {"treble": -3.0, "bass": 1.9}
 ACCIDENTAL_SYMBOLS = {SHARP: "♯", FLAT: "♭", NATURAL: "♮"}
 # How tall each sign is drawn, in staff spaces (as in printed music).
 ACCIDENTAL_HEIGHT = {SHARP: 2.6, FLAT: 2.3, NATURAL: 2.6}
+ACCIDENTAL_COLUMN = LINE_SPACING * 1.2  # how far apart staggered signs in a chord are (a ♯ is ~1 space wide)
+BAR_GAP = 10  # extra room at the start of each measure, so a ♯ ♭ ♮ never touches the bar line
 
 # Key signatures: the staff step of each sharp or flat, in the order they're
 # added (sharps F C G D A E B, flats B E A D G C F). Bass clef uses the same
@@ -170,7 +174,8 @@ class StaffWidget(QWidget):
     # turns each request into an undoable command (see edits.py).
     add_requested = Signal(object)          # a Note to add at the end ("object": any Python value)
     remove_requested = Signal(int)          # the index of a note to delete
-    move_requested = Signal(int, object, object)  # (index, old (step, alter), new (step, alter))
+    # A change to a note's heads: (index, old heads, new heads, undo text).
+    heads_requested = Signal(int, object, object, str)
 
     preview = Signal(int, int, int)  # (sound bank, program, MIDI pitch): "let me hear this note"
     hint = Signal(str)          # a short message for the status bar (e.g. which drum is here)
@@ -200,6 +205,9 @@ class StaffWidget(QWidget):
         # in quarter-note beats. The window keeps both up to date.
         self.time_signature = COMMON_TIME
         self.measure_beats = measure_length(COMMON_TIME)
+        # Where the columns are (see column_positions); None = work it out again.
+        self.positions_cache = None
+        self.extras_cache = {}
         # The notes as they're *shown*. Drawing and clicking use this; edits
         # are converted back to written pitch and applied to self.part.
         self.shown = self.build_shown()
@@ -209,10 +217,12 @@ class StaffWidget(QWidget):
 
         # Dragging: which note is being dragged (None = no drag) and where it started.
         self.drag_index = None
-        self.drag_start = None       # the dragged note's written (step, alter) before the drag
-        self.drag_shown_alter = NATURAL  # its displayed ♯/♭, kept while dragging
-        # The note the mouse is over right now (None = none), for the + / - keys.
+        self.drag_head = 0           # which head of the note (a chord has several)
+        self.drag_start = None       # the dragged note's written heads before the drag
+        self.drag_shown_alter = NATURAL  # the head's displayed ♯/♭, kept while dragging
+        # The note and head the mouse is over right now (None = none), for the + / - keys.
         self.hover_index = None
+        self.hover_head = None
         # Normally Qt only reports mouse movement while a button is held down.
         # Tracking reports it all the time, so we can change the pointer when
         # it's over a note.
@@ -230,11 +240,13 @@ class StaffWidget(QWidget):
     def refresh(self):
         """After the part's notes change: rebuild the display, resize, redraw."""
         self.shown = self.build_shown()
+        self.positions_cache = None  # the columns must be worked out again
         self.update_width()
         self.update()  # ask Qt to repaint soon; it will call paintEvent
         if self.partner is not None:
             # On a grand staff the columns are shared, so the other staff's
             # layout may have changed too.
+            self.partner.positions_cache = None
             self.partner.update_width()
             self.partner.update()
 
@@ -260,8 +272,10 @@ class StaffWidget(QWidget):
             if note.is_rest:
                 notes.append(note)
             else:
-                step, alter = self.to_shown(note.step, note.alter)
-                notes.append(Note(step, note.duration, alter))
+                heads = [self.to_shown(step, alter) for step, alter in note.heads]
+                shown = Note(heads[0][0], note.duration, heads[0][1])
+                shown.chord = heads[1:]
+                notes.append(shown)
         return Part(notes, self.part.instrument)
 
     def to_shown(self, step, alter):
@@ -350,9 +364,102 @@ class StaffWidget(QWidget):
         column_of = {beat: column for column, beat in enumerate(self.column_beats())}
         return [column_of[piece.beat] for piece in self.pieces()]
 
+    def bar_line_xs(self):
+        """The x of every bar line on this staff, left to right."""
+        xs = []
+        self.column_positions()  # makes sure extras_cache is up to date
+        for piece in self.pieces():
+            if piece.ends_measure:
+                # Just before the next measure's first column, left of any signs
+                # in front of its notes. Both staves of a grand staff share
+                # columns, so their bar lines line up.
+                next_column = self.column_for_beat(piece.beat + piece.duration)
+                left, _ = self.extras_cache.get(next_column, (0.0, 0.0))
+                xs.append(self.column_x(next_column) - left - NOTE_SPACING / 2)
+        return xs
+
+    def prefix_right(self):
+        """Where the start of the staff (clef, key and time signature) ends:
+        printing's first line begins with everything left of this."""
+        return self.first_note_x() - ROOM_BEFORE_FIRST_NOTE + 6
+
+    def line_prefix_right(self):
+        """Where the clef and key signature end. Printing starts every later
+        line with these (the time signature is only shown at the start).
+        On a grand staff, the staff whose key signature ends first decides,
+        so no sliver of either staff's time signature gets included."""
+        key_right = self.key_signature_right()
+        if self.partner is not None:
+            key_right = min(key_right, self.partner.key_signature_right())
+        return key_right + 6  # less than TIME_GAP, so it stops before the time signature
+
+    def music_end_x(self):
+        """Just after the last note (where printing can stop the staff)."""
+        return self.note_x(len(self.shown.notes)) - NOTE_SPACING / 2 + 4
+
+    def column_extras(self):
+        """Extra room each of this staff's columns needs, beyond NOTE_SPACING:
+        {column: (left, right)}. Chords can need it: heads moved to the side
+        for a second, and stacked ♯ ♭ ♮ signs further left."""
+        extras = {}
+        signs = self.shown.head_signs(self.key, self.measure_beats)
+        for piece, column in zip(self.pieces(), self.piece_columns()):
+            note = self.shown.notes[piece.note_index]
+            if note.is_rest:
+                continue
+            _, offsets = self.chord_layout(note)
+            left, right = max(0.0, -min(offsets)), max(0.0, max(offsets))
+            if piece.first:
+                sign_columns = {c for _, _, c in self.accidental_columns(note, signs[piece.note_index])}
+                left += max(0, len(sign_columns) - 1) * ACCIDENTAL_COLUMN  # one sign always fits
+            old_left, old_right = extras.get(column, (0.0, 0.0))
+            extras[column] = (max(left, old_left), max(right, old_right))
+        return extras
+
+    def column_positions(self):
+        """The x of every column, and where the next one after them would go.
+
+        Each column is NOTE_SPACING after the previous, plus whatever extra
+        room their chords need. On a grand staff, both staves use the larger
+        need at each column, so they stay lined up. The result is saved
+        ("cached") until the music or display changes (see refresh).
+        """
+        if self.positions_cache is not None:
+            return self.positions_cache
+        extras = self.column_extras()
+        if self.partner is not None:
+            for column, (left, right) in self.partner.column_extras().items():
+                old_left, old_right = extras.get(column, (0.0, 0.0))
+                extras[column] = (max(left, old_left), max(right, old_right))
+        beats = self.column_beats()
+        for column in range(1, len(beats)):
+            if beats[column] % self.measure_beats == 0:  # the first column of a measure:
+                left, right = extras.get(column, (0.0, 0.0))
+                extras[column] = (left + BAR_GAP, right)  # room for the bar line before it
+        self.extras_cache = extras  # bar_line_xs needs these too
+        xs = []
+        x = self.first_note_x()
+        for column in range(len(beats)):
+            left, _ = extras.get(column, (0.0, 0.0))
+            if column > 0:
+                _, previous_right = extras.get(column - 1, (0.0, 0.0))
+                x += NOTE_SPACING + previous_right
+            x += left
+            xs.append(x)
+        if xs:
+            _, last_right = extras.get(len(xs) - 1, (0.0, 0.0))
+            end = xs[-1] + NOTE_SPACING + last_right
+        else:
+            end = self.first_note_x()
+        self.positions_cache = (xs, end)
+        return self.positions_cache
+
     def column_x(self, column):
-        """The x position of a column (0 = first)."""
-        return self.first_note_x() + column * NOTE_SPACING
+        """The x position of a column (0 = first); past the end, where it would go."""
+        xs, end = self.column_positions()
+        if column < len(xs):
+            return xs[column]
+        return end + (column - len(xs)) * NOTE_SPACING
 
     def column_for_beat(self, beat):
         """The column at this beat; for a beat with no column, the next one along."""
@@ -376,13 +483,25 @@ class StaffWidget(QWidget):
 
     def column_at(self, x):
         """Which column is at this x position, or None if none is."""
-        column = round((x - self.first_note_x()) / NOTE_SPACING)
-        return column if 0 <= column < len(self.column_beats()) else None
+        column = self.nearest_column(x)
+        if column is None:
+            return None
+        # Only if x is within half a spacing of it.
+        return column if abs(self.column_x(column) - x) <= NOTE_SPACING / 2 else None
 
-    def piece_at(self, x):
+    def nearest_column(self, x):
+        """The column nearest to x, however far away (None if there are none)."""
+        xs, _ = self.column_positions()
+        if not xs:
+            return None
+        return min(range(len(xs)), key=lambda c: abs(xs[c] - x))
+
+    def piece_at(self, x, nearest=False):
         """This staff's piece in the column at x, or None (on a grand staff a
-        column may belong only to the other staff)."""
-        column = self.column_at(x)
+        column may belong only to the other staff). With nearest=True, the
+        nearest column is used however far away; head_at then checks each
+        head's real position (a chord's heads can sit to the side)."""
+        column = self.nearest_column(x) if nearest else self.column_at(x)
         if column is None:
             return None, None
         for piece, piece_column in zip(self.pieces(), self.piece_columns()):
@@ -398,29 +517,75 @@ class StaffWidget(QWidget):
         piece, _ = self.piece_at(x)
         return None if piece is None else piece.note_index
 
-    def note_head_at(self, pos):
-        """The index of the note whose head is under this point, or None.
+    def chord_layout(self, note):
+        """How a (shown) note's heads are arranged around their shared stem.
 
-        Any piece of a tied note counts. Rests don't count, since they
-        can't be dragged to a new pitch.
+        Returns (stem_up, offsets): offsets[i] is how far head i (in
+        note.heads order) sits from the column's x. Printed-music rules:
+        - The head farthest from the middle line decides the stem direction.
+        - Two heads a step apart (a "second") can't sit side by side on the
+          same side of the stem, so one moves to the other side.
         """
-        piece, column = self.piece_at(pos.x())
+        steps = [step for step, _ in note.heads]
+        stem_up = max(steps) - MIDDLE_LINE_STEP < MIDDLE_LINE_STEP - min(steps)
+        offsets = [0.0] * len(steps)
+        # Walk from the end where the stem starts: bottom up for an up-stem.
+        order = sorted(range(len(steps)), key=lambda i: steps[i], reverse=not stem_up)
+        previous_step, previous_moved = None, False
+        for i in order:
+            moved = (previous_step is not None and abs(steps[i] - previous_step) == 1
+                     and not previous_moved)
+            if moved:
+                offsets[i] = NOTE_HEAD_WIDTH if stem_up else -NOTE_HEAD_WIDTH
+            previous_step, previous_moved = steps[i], moved
+        return stem_up, offsets
+
+    def head_at(self, pos):
+        """Which head is under this point: (note index, head index), or (None, None).
+
+        Any piece of a tied note counts. Rests don't count, since they have
+        no heads to drag.
+        """
+        piece, column = self.piece_at(pos.x(), nearest=True)
         if piece is None:
-            return None
-        index = piece.note_index
-        note = self.shown.notes[index]  # where it's *drawn*
+            return None, None
+        note = self.shown.notes[piece.note_index]  # where it's *drawn*
         if note.is_rest:
-            return None
-        # abs() is the distance ignoring direction: abs(-3) is 3.
-        close_in_x = abs(pos.x() - self.column_x(column)) <= NOTE_HEAD_WIDTH * 0.75
-        close_in_y = abs(pos.y() - step_to_y(note.step)) <= NOTE_HEAD_HEIGHT * 0.75
-        return index if close_in_x and close_in_y else None
+            return None, None
+        _, offsets = self.chord_layout(note)
+        for head, (step, _) in enumerate(note.heads):
+            # abs() is the distance ignoring direction: abs(-3) is 3.
+            close_in_x = abs(pos.x() - self.column_x(column) - offsets[head]) <= NOTE_HEAD_WIDTH * 0.6
+            close_in_y = abs(pos.y() - step_to_y(step)) <= STEP_HEIGHT * 0.9
+            if close_in_x and close_in_y:
+                return piece.note_index, head
+        return None, None
+
+    def note_head_at(self, pos):
+        """The index of the note with a head under this point, or None."""
+        index, _ = self.head_at(pos)
+        return index
 
     def preview_note(self, note):
-        """Ask to hear this note, if Preview is switched on."""
-        if self.settings.preview and not note.is_rest:
+        """Ask to hear this note (its main head), if Preview is switched on."""
+        if not note.is_rest:
+            self.preview_head(note.step, note.alter)
+
+    def preview_head(self, step, alter):
+        """Ask to hear one written pitch, if Preview is switched on."""
+        if self.settings.preview:
             instrument = self.part.instrument
-            self.preview.emit(instrument.bank, instrument.program, self.part.sounding_pitch(note))
+            self.preview.emit(instrument.bank, instrument.program,
+                              self.part.head_sounding(step, alter))
+
+    def alter_for_new_head(self, step):
+        """The ♯/♭ for a pitch you're placing (shown step): the toolbar's choice,
+        or whatever the key signature says ("Key" mode). Drums have none."""
+        if self.part.instrument.is_drums:
+            return NATURAL
+        if self.settings.alter is None:
+            return key_alter(letter_of(step, self.part.clef), self.key)  # in G major, F -> F♯
+        return self.settings.alter
 
     def step_at(self, y):
         """The staff step for a y position; on a drum staff, the nearest drum."""
@@ -438,30 +603,25 @@ class StaffWidget(QWidget):
             return
         if event.button() != Qt.LeftButton:
             return
+        if event.modifiers() & Qt.ShiftModifier:  # & tests whether Shift is among the keys held
+            self.shift_click(event.position())
+            return
         # Pressing on a note head grabs it, to drag it to a new pitch.
-        index = self.note_head_at(event.position())
+        index, head = self.head_at(event.position())
         if index is not None:
-            self.drag_index = index
-            written = self.part.notes[index]
-            self.drag_start = (written.step, written.alter)  # for undo
-            # Dragging keeps the note's displayed ♯/♭ and changes its line or space.
-            self.drag_shown_alter = self.shown.notes[index].alter
+            self.drag_index, self.drag_head = index, head
+            self.drag_start = self.part.notes[index].heads  # all its heads, for undo
+            # Dragging keeps the head's displayed ♯/♭ and changes its line or space.
+            self.drag_shown_alter = self.shown.notes[index].heads[head][1]
             self.setCursor(Qt.ClosedHandCursor)
-            self.preview_note(self.part.notes[index])
+            self.preview_head(*self.drag_start[head])
             return
         # Anywhere else: add a new note at the end.
         if self.settings.rest_mode:
-            step = None  # a rest has no pitch, so the click's height doesn't matter
+            step, alter = None, NATURAL  # a rest has no pitch, so the click's height doesn't matter
         else:
             step = self.step_at(event.position().y())
-        if step is None or self.part.instrument.is_drums:
-            alter = NATURAL  # rests and drums have no accidental
-        elif self.settings.alter is None:
-            # Follow the key: e.g. in G major an F becomes F♯.
-            alter = key_alter(letter_of(step, self.part.clef), self.key)
-        else:
-            alter = self.settings.alter
-        if step is not None:
+            alter = self.alter_for_new_head(step)
             step, alter = self.to_written(step, alter)  # what you clicked is what's shown
         duration = self.settings.duration
         if self.settings.dotted and duration in DOTTABLE:
@@ -473,48 +633,82 @@ class StaffWidget(QWidget):
     def mouseMoveEvent(self, event):
         # Qt calls this whenever the mouse moves over us (thanks to mouse tracking).
         if self.drag_index is None:
-            # Not dragging: remember which note we're over, and show an open
-            # hand over notes that can be grabbed.
-            self.hover_index = self.note_head_at(event.position())
+            # Not dragging: remember which head we're over, and show an open
+            # hand over heads that can be grabbed.
+            self.hover_index, self.hover_head = self.head_at(event.position())
             self.setCursor(Qt.OpenHandCursor if self.hover_index is not None else Qt.ArrowCursor)
             if self.part.instrument.is_drums:
                 # Drum staffs: say which drum is at the mouse's height.
                 self.hint.emit(DRUM_MAP[self.step_at(event.position().y())].name)
             return
-        # While dragging, the note follows the mouse right away, so you can see
+        # While dragging, the head follows the mouse right away, so you can see
         # and hear where it's going. The undoable edit is made on release.
         new_step = self.step_at(event.position().y())
-        if new_step != self.shown.notes[self.drag_index].step:  # crossed into a new line or space
+        shown_steps = [step for step, _ in self.shown.notes[self.drag_index].heads]
+        if new_step != shown_steps[self.drag_head] and new_step not in shown_steps:
+            # (A head can't move onto another head of the same chord.)
             note = self.part.notes[self.drag_index]
-            note.step, note.alter = self.to_written(new_step, self.drag_shown_alter)
+            heads = note.heads
+            heads[self.drag_head] = self.to_written(new_step, self.drag_shown_alter)
+            note.set_heads(heads)
             self.refresh()
-            self.preview_note(note)
+            self.preview_head(*heads[self.drag_head])
+
+    def shift_click(self, pos):
+        """Shift+click: add a pitch to a note's chord, or remove a chord head."""
+        index, head = self.head_at(pos)
+        if index is not None:
+            # On a head: take it out of the chord.
+            heads = self.part.notes[index].heads
+            if len(heads) == 1:
+                self.hint.emit("That's the only pitch; right-click deletes the note.")
+                return
+            new = heads[:head] + heads[head + 1:]  # everything except that head
+            self.heads_requested.emit(index, heads, new, "Remove chord note")
+            return
+        # Next to a note: add the pitch at this height to its chord.
+        index = self.note_index_at(pos.x())
+        if index is None or self.part.notes[index].is_rest:
+            self.hint.emit("Shift+click above or below a note to add to its chord.")
+            return
+        step = self.step_at(pos.y())
+        if step in [s for s, _ in self.shown.notes[index].heads]:
+            return  # that line or space already has a head
+        written = self.to_written(step, self.alter_for_new_head(step))
+        heads = self.part.notes[index].heads
+        self.heads_requested.emit(index, heads, heads + [written], "Add chord note")
+        self.preview_head(*written)
 
     def leaveEvent(self, event):
         # Qt calls this when the mouse leaves the widget.
-        self.hover_index = None
+        self.hover_index = self.hover_head = None
 
-    def hovered_note_index(self):
-        """The index of the note under the mouse, or None.
+    def hovered_head(self):
+        """(note index, head index) under the mouse, or (None, None).
 
         Checked against the current notes, since an undo may have removed
-        the note the mouse was last over.
+        the note (or head) the mouse was last over.
         """
-        if self.hover_index is not None and self.hover_index < len(self.part.notes):
-            return self.hover_index
-        return None
+        index, head = self.hover_index, self.hover_head
+        if index is not None and index < len(self.part.notes) \
+                and head < len(self.part.notes[index].heads):
+            return index, head
+        return None, None
+
+    def hovered_note_index(self):
+        """The index of the note under the mouse, or None."""
+        return self.hovered_head()[0]
 
     def mouseReleaseEvent(self, event):
         # Qt calls this when a mouse button is let go: the end of a drag.
         if self.drag_index is None or event.button() != Qt.LeftButton:
             return
         index = self.drag_index
-        note = self.part.notes[index]
-        new = (note.step, note.alter)
+        new = self.part.notes[index].heads
         self.drag_index = None
         self.setCursor(Qt.OpenHandCursor)  # the pointer is still over the note
         if new != self.drag_start:  # only a real move becomes an undo step
-            self.move_requested.emit(index, self.drag_start, new)
+            self.heads_requested.emit(index, self.drag_start, new, "Move note")
 
     def paintEvent(self, event):
         # Qt calls paintEvent automatically whenever the widget needs to be
@@ -554,25 +748,22 @@ class StaffWidget(QWidget):
         # The model decides how notes are split and tied (pieces) and which
         # ♯ ♭ ♮ signs are needed (accidental_signs).
         # enumerate gives each item along with its position: (0, first), (1, second), ...
-        signs = self.shown.accidental_signs(self.key, self.measure_beats)
+        signs = self.shown.head_signs(self.key, self.measure_beats)  # per note, per head
         piece_columns = self.piece_columns()
-        bar_lines = []
         for i, piece in enumerate(pieces):
             note = self.shown.notes[piece.note_index]
             x = self.column_x(piece_columns[i])
             self.draw_note(painter, x, note, piece.duration)
-            if piece.first and signs[piece.note_index] is not None:
-                self.draw_accidental(painter, x, note.step, signs[piece.note_index])  # only once per note
+            if piece.first:  # signs only once per note, on its first piece
+                self.draw_accidentals(painter, x, note, signs[piece.note_index])
             if piece.tied:
-                self.draw_tie(painter, x, self.column_x(piece_columns[i + 1]), note.step)
-            if piece.ends_measure:
-                # Halfway between the last column of this measure and the first
-                # of the next, so bar lines line up on both staves of a grand staff.
-                next_column = self.column_for_beat(piece.beat + piece.duration)
-                bar_lines.append(self.column_x(next_column) - NOTE_SPACING / 2)
+                _, offsets = self.chord_layout(note)
+                next_x = self.column_x(piece_columns[i + 1])
+                for (step, _), offset in zip(note.heads, offsets):  # a tie for every head
+                    self.draw_tie(painter, x + offset, next_x + offset, step)
 
         painter.setPen(QPen(self.ink, 1))
-        for x in bar_lines:
+        for x in self.bar_line_xs():
             painter.drawLine(QPointF(x, step_to_y(TOP_LINE_STEP)), QPointF(x, step_to_y(0)))
 
     def clef_layout(self):
@@ -622,10 +813,6 @@ class StaffWidget(QWidget):
         """Where the key signature ends (just after the clef if there's none)."""
         _, _, clef_right = self.clef_layout()
         return clef_right + KEY_GAP + abs(self.key) * KEY_SIGN_SPACING
-
-    def draw_accidental(self, painter, x, step, alter):
-        """Draw a ♯, ♭ or ♮ just left of the note head at (x, step)."""
-        self.draw_sign(painter, x - NOTE_HEAD_WIDTH / 2 - 2, step, alter)  # a small gap
 
     def draw_key_signature(self, painter):
         """Draw the key's sharps or flats after the clef, in their standard places."""
@@ -703,48 +890,84 @@ class StaffWidget(QWidget):
                 self.draw_dot(painter, x + LINE_SPACING * 0.8, 5)  # in the third space
             return
 
-        y = step_to_y(note.step)
-        self.draw_ledger_lines(painter, x, note.step)
+        # A chord: several heads on one stem (a single note is a chord of one).
+        stem_up, offsets = self.chord_layout(note)
+        steps = [step for step, _ in note.heads]
+        for step, offset in zip(steps, offsets):
+            self.draw_ledger_lines(painter, x + offset, step)
+            self.draw_head(painter, x + offset, step, duration)
         if dotted:
-            # The dot goes in a space: a note on a line gets its dot just above.
-            dot_step = note.step if note.step % 2 else note.step + 1
-            self.draw_dot(painter, x + NOTE_HEAD_WIDTH / 2 + 5, dot_step)
-
-        is_cymbal = (self.part.instrument.is_drums
-                     and DRUM_MAP[nearest_drum_step(note.step)].cymbal)
-        if is_cymbal:
-            # Cymbals on a drum staff get an x-shaped head instead of an oval.
-            half_w, half_h = NOTE_HEAD_WIDTH * 0.4, NOTE_HEAD_HEIGHT * 0.45
-            painter.setPen(QPen(self.ink, 1.8))
-            painter.drawLine(QPointF(x - half_w, y - half_h), QPointF(x + half_w, y + half_h))
-            painter.drawLine(QPointF(x - half_w, y + half_h), QPointF(x + half_w, y - half_h))
-        else:
-            # Note head: whole and half notes are hollow; shorter notes are filled.
-            # The pen draws outlines; the brush fills the inside.
-            if duration >= HALF:
-                painter.setPen(QPen(self.ink, 1.8))  # thicker outline for hollow heads
-                painter.setBrush(Qt.NoBrush)
-            else:
-                painter.setPen(QPen(self.ink, 1))
-                painter.setBrush(self.ink)
-            painter.drawEllipse(QPointF(x, y), NOTE_HEAD_WIDTH / 2, NOTE_HEAD_HEIGHT / 2)
+            # Dots go to the right of all the heads, each in a space: a head
+            # on a line gets its dot just above.
+            dot_x = x + max(offsets) + NOTE_HEAD_WIDTH / 2 + 5
+            for step in steps:
+                self.draw_dot(painter, dot_x, step if step % 2 else step + 1)
         painter.setPen(QPen(self.ink, 1))
 
         if duration == WHOLE:
             return  # whole notes have no stem
 
-        # Notation rule: notes below the middle line have stems going up on
-        # the right; notes on or above it have stems going down on the left.
-        if note.step < MIDDLE_LINE_STEP:
+        # The stem runs from the head at one end of the chord, past the head
+        # at the other end. Up-stems are on the right of the heads, going up;
+        # down-stems on the left, going down. (Remember: y grows downward.)
+        if stem_up:
             stem_x = x + NOTE_HEAD_WIDTH / 2 - 0.5
-            stem_end_y = y - STEM_LENGTH
+            stem_start_y, stem_end_y = step_to_y(min(steps)), step_to_y(max(steps)) - STEM_LENGTH
         else:
             stem_x = x - NOTE_HEAD_WIDTH / 2 + 0.5
-            stem_end_y = y + STEM_LENGTH
-        painter.drawLine(QPointF(stem_x, y), QPointF(stem_x, stem_end_y))
+            stem_start_y, stem_end_y = step_to_y(max(steps)), step_to_y(min(steps)) + STEM_LENGTH
+        painter.drawLine(QPointF(stem_x, stem_start_y), QPointF(stem_x, stem_end_y))
 
         if duration == EIGHTH:
-            self.draw_flag(painter, stem_x, stem_end_y, stem_up=note.step < MIDDLE_LINE_STEP)
+            self.draw_flag(painter, stem_x, stem_end_y, stem_up)
+
+    def draw_head(self, painter, x, step, duration):
+        """One note head centered at (x, step), shaped by its (plain) duration."""
+        y = step_to_y(step)
+        if self.part.instrument.is_drums and DRUM_MAP[nearest_drum_step(step)].cymbal:
+            # Cymbals on a drum staff get an x-shaped head instead of an oval.
+            half_w, half_h = NOTE_HEAD_WIDTH * 0.4, NOTE_HEAD_HEIGHT * 0.45
+            painter.setPen(QPen(self.ink, 1.8))
+            painter.drawLine(QPointF(x - half_w, y - half_h), QPointF(x + half_w, y + half_h))
+            painter.drawLine(QPointF(x - half_w, y + half_h), QPointF(x + half_w, y - half_h))
+            return
+        # Whole and half notes are hollow; shorter notes are filled.
+        # The pen draws outlines; the brush fills the inside.
+        if duration >= HALF:
+            painter.setPen(QPen(self.ink, 1.8))  # thicker outline for hollow heads
+            painter.setBrush(Qt.NoBrush)
+        else:
+            painter.setPen(QPen(self.ink, 1))
+            painter.setBrush(self.ink)
+        painter.drawEllipse(QPointF(x, y), NOTE_HEAD_WIDTH / 2, NOTE_HEAD_HEIGHT / 2)
+
+    def draw_accidentals(self, painter, x, note, signs):
+        """The ♯ ♭ ♮ signs for a note's heads (signs[i] for head i, None = no sign).
+
+        In a chord, signs whose heads are close together would collide, so
+        they're staggered into columns further and further to the left.
+        """
+        if note.is_rest:
+            return  # rests have no heads, so no signs
+        _, offsets = self.chord_layout(note)
+        right = x + min(offsets) - NOTE_HEAD_WIDTH / 2 - 2  # left of the leftmost head
+        for step, sign, column in self.accidental_columns(note, signs):
+            self.draw_sign(painter, right - column * ACCIDENTAL_COLUMN, step, sign)
+
+    def accidental_columns(self, note, signs):
+        """Where a chord's signs go: (step, sign, column) for each head with a
+        sign; column 0 is next to the heads, 1 further left, and so on."""
+        placed = []
+        # Top to bottom, as engravers do.
+        for (step, _), sign in sorted(zip(note.heads, signs), key=lambda pair: -pair[0][0]):
+            if sign is None:
+                continue
+            column = 0
+            # Move left while a sign in this column is within 5 steps (they'd touch).
+            while any(column == c and abs(step - s) < 6 for s, _, c in placed):
+                column += 1
+            placed.append((step, sign, column))
+        return placed
 
     def draw_flag(self, painter, stem_x, stem_end_y, stem_up):
         """Draw an eighth-note flag: a curve from the end of the stem, to the right."""
@@ -831,6 +1054,9 @@ class GrandStaffWidget(QWidget):
         self.lower = lower
         upper.partner = lower  # partners share their columns, so notes line up
         lower.partner = upper
+        for staff in (upper, lower):
+            staff.positions_cache = None  # their layouts now depend on each other
+            staff.update_width()
         layout = QVBoxLayout(self)  # a layout that stacks widgets top to bottom
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
@@ -881,6 +1107,35 @@ class GrandStaffWidget(QWidget):
         painter.setPen(QPen(self.upper.ink, 0.8))
         painter.setBrush(self.upper.ink)
         painter.drawPath(path)
+
+
+USER_GUIDE = Path(__file__).parent / "USER_GUIDE.md"
+
+
+class HelpWindow(QDialog):
+    """Shows USER_GUIDE.md: the same file GitHub displays, so there's only
+    one guide to keep up to date."""
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.setWindowTitle("Music Staff - User Guide")
+        self.resize(720, 640)
+        self.browser = QTextBrowser()  # a read-only text area that understands Markdown
+        self.browser.setOpenExternalLinks(True)
+        try:
+            self.browser.setMarkdown(USER_GUIDE.read_text(encoding="utf-8"))
+        except OSError:
+            self.browser.setPlainText(f"The user guide wasn't found at {USER_GUIDE}.")
+        layout = QVBoxLayout(self)
+        layout.addWidget(self.browser)
+
+    def show_section(self, heading):
+        """Scroll so the heading with this text is at the top."""
+        found = self.browser.document().find(heading)  # a cursor at the text, if found
+        if not found.isNull():
+            layout = self.browser.document().documentLayout()
+            top = layout.blockBoundingRect(found.block()).top()  # how far down it is
+            self.browser.verticalScrollBar().setValue(round(top))
 
 
 class MainWindow(QMainWindow):
@@ -1087,6 +1342,7 @@ class MainWindow(QMainWindow):
         self.build_edit_menu()
         view_menu = self.menuBar().addMenu("&View")
         view_menu.addAction(self.concert_action)  # the same action as the toolbar button
+        self.build_help_menu()
         self.update_title()
 
     # --- Tabs ---------------------------------------------------------------
@@ -1139,9 +1395,9 @@ class MainWindow(QMainWindow):
             lambda note, part=part: self.undo_stack.push(AddNote(self, part, note)))
         staff.remove_requested.connect(
             lambda i, part=part: self.undo_stack.push(RemoveNote(self, part, i)))
-        staff.move_requested.connect(
-            lambda i, old, new, part=part: self.undo_stack.push(
-                SetNotePitch(self, part, i, old, new, "Move note")))
+        staff.heads_requested.connect(
+            lambda i, old, new, text, part=part: self.undo_stack.push(
+                SetHeads(self, part, i, old, new, text)))
         return staff
 
     def show_part(self, part, index=None):
@@ -1481,12 +1737,33 @@ class MainWindow(QMainWindow):
             ("&Save", QKeySequence.Save, self.save),
             ("Save &As...", QKeySequence.SaveAs, self.save_as),
             ("&Export MIDI...", QKeySequence("Ctrl+E"), self.export_midi_file),
+            ("&Print to PDF...", QKeySequence.Print, self.export_pdf_file),  # Ctrl+P
         ]:
             action = menu.addAction(text)
             action.setShortcut(shortcut)
             action.triggered.connect(slot)
         menu.addSeparator()
         menu.addAction("E&xit").triggered.connect(self.close)  # close() runs closeEvent
+
+    def build_help_menu(self):
+        """The Help menu: the user guide, and a jump to its shortcut table."""
+        menu = self.menuBar().addMenu("&Help")
+        guide = menu.addAction("&User Guide")
+        guide.setShortcut(QKeySequence.HelpContents)  # F1 on Windows
+        guide.triggered.connect(lambda: self.show_help())
+        shortcuts = menu.addAction("&Keyboard Shortcuts")
+        shortcuts.triggered.connect(lambda: self.show_help("Keyboard and mouse reference"))
+        self.help_window = None  # made the first time it's needed
+
+    def show_help(self, section=None):
+        """Open the user guide (at `section`, if given). It's a separate window,
+        so you can keep it open beside the music."""
+        if self.help_window is None:
+            self.help_window = HelpWindow(self)
+        self.help_window.show()
+        self.help_window.raise_()  # bring it to the front if it was behind
+        if section:
+            self.help_window.show_section(section)
 
     def build_edit_menu(self):
         """The Edit menu: Undo and Redo."""
@@ -1525,20 +1802,20 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("Point at a note, then press + or -.", 3000)
             return
         staff = hovered[0]
-        index = staff.hovered_note_index()
-        # Work with the note as it's *shown* (concert pitch view may differ),
+        index, head = staff.hovered_head()  # in a chord, just the head under the mouse
+        # Work with the head as it's *shown* (concert pitch view may differ),
         # then convert the result back to written pitch for storing.
-        shown = staff.shown.notes[index]
-        new_alter = shown.alter + direction
+        shown_step, shown_alter = staff.shown.notes[index].heads[head]
+        new_alter = shown_alter + direction
         if not FLAT <= new_alter <= SHARP:  # Python allows chained comparisons like this
             self.statusBar().showMessage("Double sharps and flats aren't supported.", 3000)
             return
-        note = staff.part.notes[index]
-        old = (note.step, note.alter)
-        new = staff.to_written(shown.step, new_alter)
+        old = staff.part.notes[index].heads
+        new = list(old)
+        new[head] = staff.to_written(shown_step, new_alter)
         text = "Raise note" if direction > 0 else "Lower note"
-        self.undo_stack.push(SetNotePitch(self, staff.part, index, old, new, text))
-        staff.preview_note(note)  # hear the new pitch
+        self.undo_stack.push(SetHeads(self, staff.part, index, old, new, text))
+        staff.preview_head(*new[head])  # hear the new pitch
 
     def update_staff_display(self, staff):
         """Show a staff at written pitch, or at concert pitch if that's switched on."""
@@ -1657,6 +1934,45 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Couldn't export MIDI", f"{path}\n\n{error}")
             return
         self.statusBar().showMessage(f"Exported {path}", 3000)
+
+    def export_pdf_file(self):
+        """Print the score to a PDF: each instrument in turn, on US Letter pages."""
+        name = display_name(self.file_path) if self.file_path else "Untitled"
+        suggested = str(Path(self.start_folder()) / f"{name}.pdf")
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Print to PDF", suggested, "PDF files (*.pdf);;All files (*)")
+        if not path:
+            return  # cancelled
+        if not path.lower().endswith(".pdf"):
+            path += ".pdf"
+        top, bottom = self.score.time_signature
+        subtitle = (f"♩ = {self.score.tempo_bpm}   ·   "
+                    f"{KEY_NAMES[self.score.key][0]}   ·   {top}/{bottom}")
+        sections = [self.print_section(i) for i in range(self.tabs.count())]
+        try:
+            export_pdf(path, name, subtitle, sections)
+        except OSError as error:
+            QMessageBox.warning(self, "Couldn't print to PDF", f"{path}\n\n{error}")
+            return
+        self.statusBar().showMessage(f"Printed {path}", 3000)
+
+    def print_section(self, tab_index):
+        """A fresh, unseen copy of one tab's staff (or grand staff) to print:
+        written pitch (what players read), black ink, no cursor."""
+        part = self.score.parts[tab_index]
+        staves = []
+        for staff_part in part.staves():
+            staff = StaffWidget(staff_part, EditSettings())
+            staff.set_display(0, staff_part.written_key(self.score.key), self.score.time_signature)
+            staves.append(staff)
+        widget = GrandStaffWidget(*staves) if len(staves) == 2 else staves[0]
+        # Size it to hold all the music, and let its layout place the staves.
+        width = max(staff.minimumWidth() for staff in staves)
+        height = sum(staff.minimumHeight() for staff in staves)
+        widget.resize(width, height)
+        if widget.layout() is not None:
+            widget.layout().activate()  # place the two staves now (it isn't on screen)
+        return Section(self.tabs.tabText(tab_index), widget, staves[0])
 
     def write_file(self, path):
         try:

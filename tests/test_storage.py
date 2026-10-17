@@ -105,6 +105,16 @@ def test_older_files_are_in_four_four():
     assert score_from_dict(data).time_signature == (4, 4)
 
 
+def test_chords_are_saved(tmp_path):
+    score = make_duet()
+    score.parts[0].notes[0].chord = [(2, 0), (4, -1)]
+    path = tmp_path / "chords.music.json"
+    save_score(score, path)
+    loaded = load_score(path)
+    assert loaded.parts[0].notes[0].chord == [(2, 0), (4, -1)]  # tuples again
+    assert loaded == score
+
+
 def test_future_versions_are_rejected():
     data = score_to_dict(make_duet())
     data["version"] = 99

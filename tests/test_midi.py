@@ -161,6 +161,13 @@ def test_grand_staff_exports_both_hands_on_one_channel():
     assert notes_in(tracks[1]) == [(0, 480, 0, 48), (0, 480, 0, 60)]
 
 
+def test_chord_exports_every_head():
+    score = Score()
+    score.add_part(find_instrument("Violin")).notes = [Note(-2, chord=[(0, 0), (2, 0)])]
+    _, tracks = read_midi(score_to_midi(score))
+    assert [n[3] for n in notes_in(tracks[1])] == [60, 64, 67]
+
+
 def test_export_writes_a_file(tmp_path):
     score = Score()
     score.add_part(find_instrument("Violin")).notes = [Note(0)]

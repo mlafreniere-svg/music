@@ -308,19 +308,20 @@ INSTRUMENTS = [instrument for _, group in INSTRUMENT_GROUPS for instrument in gr
 
 
 def rewrite_for_instrument(notes, old, new):
-    """The notes' new (step, alter) when switching from instrument `old` to `new`.
+    """The notes' new heads when switching from instrument `old` to `new`.
 
-    The sound is kept: each note is respelled so the new instrument plays the
-    same note names (in sound), then the whole part moves by octaves to sit
-    well on the new staff. Rests come back as None.
+    Returns, for each note, its list of (step, alter) heads (see Note.heads),
+    or None for a rest. The sound is kept: each head is respelled so the new
+    instrument plays the same note names (in sound), then the whole part
+    moves by octaves to sit well on the new staff.
     """
     if old.clef == new.clef and old.transpose == new.transpose:
-        return [None if n.is_rest else (n.step, n.alter) for n in notes]
+        return [None if n.is_rest else n.heads for n in notes]
     if old.is_drums or new.is_drums:
         # Drums have no pitch, so there's no sound to keep: notes keep their
         # place on the staff (snapped to a drum when going to drums).
         snap = nearest_drum_step if new.is_drums else (lambda step: step)
-        return [None if n.is_rest else (snap(n.step), NATURAL) for n in notes]
+        return [None if n.is_rest else [(snap(s), NATURAL) for s, _ in n.heads] for n in notes]
     # How much higher the new instrument's written notes are (0-11 half steps,
     # ignoring octaves), and so how many letters they move.
     letters_up = LETTERS_FOR_SEMITONES[(old.transpose - new.transpose) % 12]
@@ -329,12 +330,16 @@ def rewrite_for_instrument(notes, old, new):
         if note.is_rest:
             spelled.append(None)
             continue
-        sounding = step_to_midi(note.step, old.clef) + note.alter + old.transpose
-        written = sounding - new.transpose
-        letter = (letter_of(note.step, old.clef) + letters_up) % 7
-        spelled.append(spell(written, new.clef, letter))
-    shift = fit_octave_shift([step for step, _ in filter(None, spelled)])  # filter(None, ...) skips rests
-    return [None if s is None else (s[0] + shift, s[1]) for s in spelled]
+        heads = []
+        for step, alter in note.heads:
+            sounding = step_to_midi(step, old.clef) + alter + old.transpose
+            written = sounding - new.transpose
+            letter = (letter_of(step, old.clef) + letters_up) % 7
+            heads.append(spell(written, new.clef, letter))
+        spelled.append(heads)
+    all_steps = [step for heads in filter(None, spelled) for step, _ in heads]  # filter(None, ...) skips rests
+    shift = fit_octave_shift(all_steps)
+    return [None if heads is None else [(s + shift, a) for s, a in heads] for heads in spelled]
 
 
 def find_instrument(name):
@@ -364,14 +369,30 @@ class Note:
     # its letter. Whether a sign is *drawn* is decided separately (see
     # Part.accidental_signs), the way printed music does it.
     alter: int = NATURAL
+    # A chord: the *other* pitches played with this one, as (step, alter)
+    # pairs. Empty for a single note. They share this note's duration and stem.
+    chord: list = field(default_factory=list)
 
     @property
     def is_rest(self):
         """True if this is a rest. Use it like a value: note.is_rest"""
         return self.step is None
 
+    @property
+    def heads(self):
+        """Every pitch of the note as (step, alter) pairs: the main one first,
+        then any chord pitches. A rest has none."""
+        if self.is_rest:
+            return []
+        return [(self.step, self.alter)] + list(self.chord)
+
+    def set_heads(self, heads):
+        """Replace every pitch of the note: heads[0] becomes the main one."""
+        self.step, self.alter = heads[0]
+        self.chord = list(heads[1:])
+
     def midi_pitch(self, clef="treble"):
-        """This note's MIDI pitch, or None for a rest."""
+        """This note's (main) MIDI pitch, or None for a rest."""
         if self.is_rest:
             return None
         return step_to_midi(self.step, clef) + self.alter
@@ -409,16 +430,25 @@ class Part:
         """The part's staves, top to bottom: just itself, or itself and its lower staff."""
         return [self] if self.lower is None else [self, self.lower]
 
-    def sounding_pitch(self, note):
-        """The MIDI pitch this note actually sounds at (None for a rest).
+    def head_sounding(self, step, alter):
+        """The MIDI pitch a written (step, alter) actually sounds at.
 
-        For transposing instruments this differs from the written pitch.
+        For transposing instruments this differs from the written pitch;
+        on a drum staff it's which drum to hit.
         """
+        if self.instrument.is_drums:
+            return DRUM_MAP[nearest_drum_step(step)].key
+        return step_to_midi(step, self.clef) + alter + self.instrument.transpose
+
+    def sounding_pitch(self, note):
+        """The MIDI pitch this note's main head sounds at (None for a rest)."""
         if note.is_rest:
             return None
-        if self.instrument.is_drums:
-            return DRUM_MAP[nearest_drum_step(note.step)].key  # which drum to hit
-        return note.midi_pitch(self.clef) + self.instrument.transpose
+        return self.head_sounding(note.step, note.alter)
+
+    def sounding_pitches(self, note):
+        """Every pitch this note sounds (a chord sounds several; a rest none)."""
+        return [self.head_sounding(step, alter) for step, alter in note.heads]
 
     def written_key(self, concert_key):
         """The key signature this part shows, for a piece in `concert_key`.
@@ -456,17 +486,17 @@ class Part:
         if self.notes:  # an empty list counts as False, so this means "if not empty"
             self.notes.pop()  # pop() removes the last item of a list
 
-    def accidental_signs(self, key=0, measure_beats=BEATS_PER_MEASURE):
-        """Which accidental sign to draw in front of each note, if any.
+    def head_signs(self, key=0, measure_beats=BEATS_PER_MEASURE):
+        """Which accidental sign to draw in front of each head of each note.
 
-        Returns one entry per note: None (draw nothing), or SHARP, FLAT, or
-        NATURAL (draw that sign). Standard rule: the key signature says what
-        each letter normally is; an accidental changes that line or space
-        for the rest of its measure; a bar line resets everything.
-        `measure_beats` is the measure's length (see measure_length).
+        Returns one list per note, with one entry per head (see Note.heads):
+        None (draw nothing), or SHARP, FLAT, or NATURAL (draw that sign).
+        Standard rule: the key signature says what each letter normally is;
+        an accidental changes that line or space for the rest of its measure;
+        a bar line resets everything. `measure_beats` is the measure's length.
         """
         if self.instrument.is_drums:
-            return [None] * len(self.notes)  # drums have no sharps or flats
+            return [[None] * len(note.heads) for note in self.notes]  # no sharps or flats
         signs = []
         current = {}  # staff step -> its alter so far in this measure
         beats = 0.0
@@ -475,15 +505,19 @@ class Part:
             if beats // measure_beats != measure:  # crossed into a new measure
                 measure = beats // measure_beats
                 current = {}  # back to the key signature
-            sign = None
-            if not note.is_rest:
-                expected = current.get(note.step, key_alter(letter_of(note.step, self.clef), key))
-                if note.alter != expected:
-                    sign = note.alter  # different from what the reader expects: show it
-                current[note.step] = note.alter
-            signs.append(sign)
+            note_signs = []
+            for step, alter in note.heads:
+                expected = current.get(step, key_alter(letter_of(step, self.clef), key))
+                # Different from what the reader expects: show it.
+                note_signs.append(alter if alter != expected else None)
+                current[step] = alter
+            signs.append(note_signs)
             beats += note.duration
         return signs
+
+    def accidental_signs(self, key=0, measure_beats=BEATS_PER_MEASURE):
+        """The sign for each note's main head (None for rests): see head_signs."""
+        return [signs[0] if signs else None for signs in self.head_signs(key, measure_beats)]
 
     def pieces(self, measure_beats=BEATS_PER_MEASURE):
         """How to *write* the notes: each note split into drawable pieces.
@@ -600,10 +634,14 @@ class Score:
             for staff_index, staff in enumerate(part.staves()):
                 beat = 0.0
                 for note_index, note in enumerate(staff.notes):
-                    pitch = staff.sounding_pitch(note)  # what you hear, not what's written
-                    events.append(Event(beat, True, part_index, note_index, pitch, staff_index))
-                    beat += note.duration
-                    events.append(Event(beat, False, part_index, note_index, pitch, staff_index))
+                    # What you hear, not what's written: every head of a chord.
+                    # A rest still gets one silent pair (pitch None) so the cursor moves.
+                    pitches = staff.sounding_pitches(note) or [None]
+                    end = beat + note.duration
+                    for pitch in pitches:
+                        events.append(Event(beat, True, part_index, note_index, pitch, staff_index))
+                        events.append(Event(end, False, part_index, note_index, pitch, staff_index))
+                    beat = end
         # Sort by beat. At the same beat, endings (starts=False) come before
         # beginnings (starts=True), because False sorts before True. So a
         # repeated note is released before it's played again.

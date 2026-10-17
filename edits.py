@@ -63,12 +63,12 @@ class RemoveNote(QUndoCommand):
         self.view.part_changed(self.part, self.index)
 
 
-class SetNotePitch(QUndoCommand):
-    """Change a note's written pitch: its staff step and its ♯/♭.
+class SetHeads(QUndoCommand):
+    """Change a note's pitches: its list of (step, alter) heads (see Note.heads).
 
-    Used for dragging ("Move note") and for + / - ("Raise note", "Lower note").
-    Both can change the step *and* the accidental (in concert pitch view a
-    displayed change becomes a respelled written one), so both are stored.
+    One command covers every pitch edit: dragging a head ("Move note"),
+    + / - ("Raise note", "Lower note"), and adding or removing a chord head
+    with Shift+click. It simply stores the whole list before and after.
     """
 
     def __init__(self, view, part, index, old, new, text):
@@ -76,12 +76,11 @@ class SetNotePitch(QUndoCommand):
         self.view = view
         self.part = part
         self.index = index
-        self.old = old  # (step, alter) before
-        self.new = new  # (step, alter) after
+        self.old = list(old)  # heads before (a copy, so later edits can't change it)
+        self.new = list(new)  # heads after
 
-    def apply(self, pitch):
-        note = self.part.notes[self.index]
-        note.step, note.alter = pitch
+    def apply(self, heads):
+        self.part.notes[self.index].set_heads(heads)
         self.view.part_changed(self.part, self.index)
 
     def redo(self):
@@ -104,21 +103,22 @@ class ChangeInstrument(QUndoCommand):
         self.part = part
         self.old_instrument = part.instrument
         self.new_instrument = instrument
-        # Remember every note's (step, alter) before and after, so undo is exact.
-        self.old_spelling = [None if n.is_rest else (n.step, n.alter) for n in part.notes]
+        # Remember every note's heads before and after, so undo is exact.
+        self.old_spelling = [None if n.is_rest else n.heads for n in part.notes]
         self.new_spelling = rewrite_for_instrument(part.notes, part.instrument, instrument)
 
     def apply(self, instrument, spelling):
-        """Set the instrument and give every pitched note its (step, alter)."""
+        """Set the instrument and give every pitched note its heads (main + chord)."""
         self.part.instrument = instrument
         if self.part.lower is not None:
             # Grand staff (only ever switched to another grand-staff keyboard):
             # the left hand gets the same sound, in bass clef. Its notes stay put.
             self.part.lower.instrument = instrument.bass_staff
         # zip pairs up two lists item by item: (note 0, spelling 0), (note 1, ...), ...
-        for note, spelled in zip(self.part.notes, spelling):
-            if spelled is not None:
-                note.step, note.alter = spelled  # unpack the pair into two fields
+        for note, heads in zip(self.part.notes, spelling):
+            if heads is not None:
+                note.step, note.alter = heads[0]  # unpack the pair into two fields
+                note.chord = list(heads[1:])       # the rest of the chord, if any
         self.view.instrument_changed(self.part)
 
     def redo(self):

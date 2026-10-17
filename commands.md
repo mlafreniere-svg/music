@@ -126,38 +126,8 @@ Expand-Archive <zip> <folder>              # unzip it
 | `python play_note.py` | Sound test: plays middle C. |
 | `python main.py` | Run the music staff app. |
 
-Keyboard shortcuts inside the app:
-
-| Key | What it does |
-|---|---|
-| `1` `2` `3` `4` | Choose whole / half / quarter / eighth. |
-| `R` | Turn rest mode on/off (clicks add rests of the chosen duration). |
-| `.` | Dot on/off: half and quarter notes become dotted (1½ times as long). |
-| `K` | New notes follow the key signature (e.g. F becomes F♯ in G major). The default. |
-| `N` `S` `F` | Natural / sharp / flat for the next notes you place. |
-| Key drop-down | Choose the key signature (Score toolbar). Notes keep their pitches; signs update. |
-| Time drop-down | Choose the time signature (Score toolbar). Notes stay the same; bar lines and ties move. |
-| Concert Pitch | Show transposing instruments at the pitch they sound (Score toolbar, or View menu / `Alt+V`). |
-| Point at a note + `+` (or `=`) | Raise that note a half step (♭ → ♮ → ♯). |
-| Point at a note + `-` | Lower that note a half step (♯ → ♮ → ♭). |
-| `Backspace` | Delete the last note (on a grand staff: of the staff you last clicked). |
-| `Space` | Play / pause. After a pause, it resumes from the same spot. |
-| `Esc` | Stop and go back to the beginning. |
-| `Ctrl+N` | New score (asks first if there are unsaved changes). |
-| `Ctrl+O` | Open a saved score (`.music.json`). |
-| `Ctrl+S` | Save. The first time, it asks for a file name. |
-| `Ctrl+Shift+S` | Save As: save under a new name. |
-| `Ctrl+E` | Export MIDI: a `.mid` file that MuseScore, a DAW, or any music program can open. |
-| `Alt+F` | Open the File menu. |
-| `Ctrl+Z` | Undo the last edit (notes, drags, tabs, tempo). Repeat to go further back. |
-| `Ctrl+Y` | Redo what you just undid. |
-| `Alt+E` | Open the Edit menu (it names what Undo/Redo will do, e.g. "Undo Move note"). |
-
-A `*` after the name in the title bar means there are unsaved changes. Undoing back to the saved state removes it.
-| Right-click a note | Delete that note. |
-| Drag a note up/down | Change its pitch (the pointer becomes a hand over a note). |
-| Right-click a tab | Change that tab's instrument. |
-| Point at a Drum Kit staff | The status bar names the drum at that height (kick, snare, hi-hat...). |
+How to *use* the app (every button, key and mouse action) is in **[USER_GUIDE.md](USER_GUIDE.md)**,
+which the app also shows under **Help ▸ User Guide** (`F1`). This file covers the command line.
 
 
 ## Testing (pytest)

@@ -17,7 +17,7 @@ from model import COMMON_TIME, Note, Part, Score, find_instrument
 
 FILE_EXTENSION = ".music.json"
 FORMAT_NAME = "music-staff"  # identifies our files among all JSON files
-FORMAT_VERSION = 4           # bump this if the layout of the file ever changes
+FORMAT_VERSION = 5           # bump this if the layout of the file ever changes
 # Version history:
 #   1  tempo, parts, notes (step + duration)
 #   2  adds each note's "alter" (sharp/flat) and the score's "key" signature.
@@ -25,17 +25,30 @@ FORMAT_VERSION = 4           # bump this if the layout of the file ever changes
 #   3  adds "lower_notes" for grand-staff parts (the left hand).
 #      Older files have no grand staffs, so they load unchanged.
 #   4  adds the "time_signature", e.g. [3, 4]. Older files are in 4/4.
-READABLE_VERSIONS = (1, 2, 3, 4)
+#   5  adds "chord" to notes that have extra pitches: [[step, alter], ...].
+READABLE_VERSIONS = (1, 2, 3, 4, 5)
+
+
+def note_to_dict(note):
+    data = {"step": note.step, "duration": note.duration, "alter": note.alter}
+    if note.chord:  # only chords get the extra key, so single notes stay short
+        data["chord"] = [list(head) for head in note.chord]
+    return data
 
 
 def notes_to_list(notes):
     """Notes as plain dicts, ready for JSON."""
-    return [{"step": n.step, "duration": n.duration, "alter": n.alter} for n in notes]
+    return [note_to_dict(n) for n in notes]
 
 
 def notes_from_list(items):
-    """The reverse of notes_to_list. Missing "alter" (version 1 files) means natural."""
-    return [Note(item["step"], item["duration"], item.get("alter", 0)) for item in items]
+    """The reverse of notes_to_list. Missing "alter" (version 1 files) means
+    natural; missing "chord" means a single note."""
+    return [
+        Note(item["step"], item["duration"], item.get("alter", 0),
+             [tuple(head) for head in item.get("chord", [])])  # JSON lists back to tuples
+        for item in items
+    ]
 
 
 def score_to_dict(score):

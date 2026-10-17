@@ -301,8 +301,10 @@ def sounds(notes, instrument):
 
 def switched(notes, old, new):
     """The notes after switching instruments, as new Note objects."""
-    spelling = rewrite_for_instrument(notes, old, new)
-    return [Note(None) if s is None else Note(s[0], alter=s[1]) for s in spelling]
+    spelling = rewrite_for_instrument(notes, old, new)  # each note: its list of heads, or None
+    return [Note(None) if heads is None
+            else Note(heads[0][0], alter=heads[0][1], chord=list(heads[1:]))
+            for heads in spelling]
 
 
 def test_same_kind_of_instrument_changes_nothing():
@@ -450,6 +452,47 @@ def test_timeline_plays_both_hands_together():
 def test_pieces_know_their_beat():
     part = Part([Note(0), Note(0, HALF), Note(0)])
     assert [p.beat for p in part.pieces()] == [0.0, 1.0, 3.0]
+
+
+# --- Chords --------------------------------------------------------------
+
+C_MAJOR_TRIAD = Note(-2, chord=[(0, NATURAL), (2, NATURAL)])  # C4 E4 G4 in treble
+
+
+def test_chord_heads_and_pitches():
+    assert C_MAJOR_TRIAD.heads == [(-2, NATURAL), (0, NATURAL), (2, NATURAL)]
+    assert Part([C_MAJOR_TRIAD]).sounding_pitches(C_MAJOR_TRIAD) == [60, 64, 67]
+    assert Note(None).heads == []
+
+
+def test_chord_plays_every_head_at_once():
+    score = Score()
+    score.add_part(PIANO).notes = [C_MAJOR_TRIAD, Note(4)]
+    starts = [(e.beat, e.pitch) for e in score.timeline() if e.starts]
+    assert starts == [(0.0, 60), (0.0, 64), (0.0, 67), (1.0, 71)]
+
+
+def test_chord_heads_get_their_own_accidentals():
+    # C4 with E-flat and G: only the E-flat needs a sign.
+    chord = Note(-2, chord=[(0, FLAT), (2, NATURAL)])
+    part = Part([chord, Note(0)])  # then a plain E in the same measure
+    assert part.head_signs() == [[None, FLAT, None], [NATURAL]]  # the E needs a natural
+    assert part.accidental_signs() == [None, NATURAL]            # main heads only
+
+
+def test_chord_switches_instrument_keeping_the_sound():
+    trumpet = switched([C_MAJOR_TRIAD], VIOLIN, TRUMPET)[0]
+    assert sounds_all(trumpet, TRUMPET) == sounds_all(C_MAJOR_TRIAD, VIOLIN)  # same note names
+    assert len(trumpet.heads) == 3
+
+
+def sounds_all(note, instrument):
+    return sorted(p % 12 for p in Part([note], instrument).sounding_pitches(note))
+
+
+def test_drum_chord_hits_two_drums():
+    beat = Note(1, chord=[(9, NATURAL)])  # kick + hi-hat together
+    assert Part([beat], DRUMS).sounding_pitches(beat) == [36, 42]
 
 
 def test_instrument_transpositions_are_sensible():
