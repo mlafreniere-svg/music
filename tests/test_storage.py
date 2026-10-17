@@ -88,6 +88,23 @@ def test_version_2_files_still_load():
     assert score.parts[0].notes[0].alter == 1
 
 
+def test_time_signature_is_saved(tmp_path):
+    score = make_duet()
+    score.time_signature = (6, 8)
+    path = tmp_path / "waltz.music.json"
+    save_score(score, path)
+    loaded = load_score(path)
+    assert loaded.time_signature == (6, 8)  # a tuple again, so the scores compare equal
+    assert loaded == score
+
+
+def test_older_files_are_in_four_four():
+    data = score_to_dict(make_duet())
+    del data["time_signature"]
+    data["version"] = 3
+    assert score_from_dict(data).time_signature == (4, 4)
+
+
 def test_future_versions_are_rejected():
     data = score_to_dict(make_duet())
     data["version"] = 99

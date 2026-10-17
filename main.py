@@ -16,13 +16,13 @@ from PySide6.QtWidgets import (
 )
 
 from model import (  # our own model.py
-    DRUM_MAP, EIGHTH, FLAT, GRAND_PIANO, HALF, INSTRUMENT_GROUPS, KEY_NAMES, NATURAL, QUARTER,
-    SHARP, WHOLE, Note, Part, Score, key_alter, key_name, letter_of, nearest_drum_step,
-    transpose_note,
+    COMMON_TIME, DOTTABLE, DRUM_MAP, EIGHTH, FLAT, GRAND_PIANO, HALF, INSTRUMENT_GROUPS,
+    KEY_NAMES, NATURAL, QUARTER, SHARP, TIME_SIGNATURES, WHOLE, Note, Part, Score, key_alter,
+    key_name, letter_of, measure_length, nearest_drum_step, transpose_note, undotted,
 )
 from edits import (
-    AddNote, AddPart, ChangeInstrument, ChangeKey, ChangeTempo, RemoveNote, RemovePart,
-    SetNotePitch,
+    AddNote, AddPart, ChangeInstrument, ChangeKey, ChangeTempo, ChangeTimeSignature,
+    RemoveNote, RemovePart, SetNotePitch,
 )
 from midi_export import export_midi
 from player import MAX_PARTS, PAUSED, PLAYING, STOPPED, Player
@@ -112,6 +112,8 @@ ACCIDENTAL_HEIGHT = {SHARP: 2.6, FLAT: 2.3, NATURAL: 2.6}
 KEY_SHARP_STEPS = {"treble": [8, 5, 9, 6, 3, 7, 4], "bass": [6, 3, 7, 4, 1, 5, 2]}
 KEY_FLAT_STEPS = {"treble": [4, 7, 3, 6, 2, 5, 1], "bass": [2, 5, 1, 4, 0, 3, -1]}
 DRUM_CLEF_WIDTH = LINE_SPACING * 0.9   # the percussion clef's two bars, side to side
+TIME_SIGNATURE_FONT = "Times New Roman"  # bold serif numbers, as in printed music
+TIME_GAP = 8                           # space between the key signature and the time signature
 KEY_GAP = 6                            # space between the clef and the key signature
 KEY_SIGN_SPACING = LINE_SPACING * 1.25  # distance between the key's signs (a sharp is ~1 space wide)
 # After the key signature: half a note head + an accidental + small gaps.
@@ -143,6 +145,7 @@ class EditSettings:
     preview: bool = True     # when True, you hear each note as you place it
     # Sharp, flat, or natural for the next note; None = follow the key signature.
     alter: int | None = None
+    dotted: bool = False     # when True, half and quarter notes are placed dotted
 
 
 def step_to_y(step):
@@ -193,6 +196,10 @@ class StaffWidget(QWidget):
         self.offset = 0
         # On a grand staff: the other staff (they share columns). None otherwise.
         self.partner = None
+        # The time signature, drawn after the key, and how long a measure is
+        # in quarter-note beats. The window keeps both up to date.
+        self.time_signature = COMMON_TIME
+        self.measure_beats = measure_length(COMMON_TIME)
         # The notes as they're *shown*. Drawing and clicking use this; edits
         # are converted back to written pitch and applied to self.part.
         self.shown = self.build_shown()
@@ -231,14 +238,17 @@ class StaffWidget(QWidget):
             self.partner.update_width()
             self.partner.update()
 
-    def set_display(self, offset, key):
-        """Show the notes moved by `offset` half steps, with key signature `key`.
+    def set_display(self, offset, key, time_signature):
+        """Show the notes moved by `offset` half steps, with key signature `key`
+        and the given time signature.
 
         Written pitch: offset 0 and the part's written key. Concert pitch:
         the instrument's concert offset and the piece's concert key.
         """
         self.offset = offset
         self.key = key
+        self.time_signature = time_signature
+        self.measure_beats = measure_length(time_signature)
         self.refresh()
 
     def build_shown(self):
@@ -275,9 +285,41 @@ class StaffWidget(QWidget):
             self.scroll_to.emit(self.note_x(index))  # keep the cursor in view
 
     def own_first_note_x(self):
-        """Where this staff's first note could go: after its clef and key
-        signature, leaving room for a ♯, ♭ or ♮ in front of it."""
-        return max(FIRST_NOTE_X, self.key_signature_right() + ROOM_BEFORE_FIRST_NOTE)
+        """Where this staff's first note could go: after its clef, key and time
+        signatures, leaving room for a ♯, ♭ or ♮ in front of it."""
+        return max(FIRST_NOTE_X, self.time_signature_right() + ROOM_BEFORE_FIRST_NOTE)
+
+    def time_signature_layout(self):
+        """The time signature's font, left edge, and width (it follows the key)."""
+        font = QFont(TIME_SIGNATURE_FONT)
+        font.setBold(True)
+        font.setPixelSize(100)
+        test_height = QFontMetricsF(font).tightBoundingRect("8").height()
+        # Each number is as tall as two staff spaces (half the staff).
+        font.setPixelSize(round(100 * LINE_SPACING * 1.9 / test_height))
+        metrics = QFontMetricsF(font)
+        width = max(metrics.tightBoundingRect(str(n)).width() for n in self.time_signature)
+        return font, self.key_signature_right() + TIME_GAP, width
+
+    def time_signature_right(self):
+        """Where the time signature ends."""
+        _, left, width = self.time_signature_layout()
+        return left + width
+
+    def draw_time_signature(self, painter):
+        """The two stacked numbers: top in the upper half of the staff, bottom in the lower."""
+        font, left, width = self.time_signature_layout()
+        metrics = QFontMetricsF(font)
+        painter.setFont(font)
+        painter.setPen(QPen(self.ink, 1))
+        top, bottom = self.time_signature
+        for number, (high_step, low_step) in ((top, (8, 4)), (bottom, (4, 0))):
+            text = str(number)
+            outline = metrics.tightBoundingRect(text)
+            middle_y = (step_to_y(high_step) + step_to_y(low_step)) / 2
+            baseline = middle_y - (outline.top() + outline.height() / 2)  # centered vertically
+            x = left + (width - outline.width()) / 2 - outline.left()    # and horizontally
+            painter.drawText(QPointF(x, baseline), text)
 
     def first_note_x(self):
         """Where the first note goes. On a grand staff both staves use the
@@ -292,17 +334,21 @@ class StaffWidget(QWidget):
     # A single staff never has two pieces starting together, so there every
     # piece simply gets its own column.
 
+    def pieces(self):
+        """The shown notes split into drawable pieces, in this score's measures."""
+        return self.shown.pieces(self.measure_beats)
+
     def column_beats(self):
         """The start beat of every column, in order."""
-        beats = {piece.beat for piece in self.shown.pieces()}  # a set: no repeats
+        beats = {piece.beat for piece in self.pieces()}  # a set: no repeats
         if self.partner is not None:
-            beats |= {piece.beat for piece in self.partner.shown.pieces()}  # |= adds a set
+            beats |= {piece.beat for piece in self.partner.pieces()}  # |= adds a set
         return sorted(beats)
 
     def piece_columns(self):
         """The column of each of this staff's pieces, in order."""
         column_of = {beat: column for column, beat in enumerate(self.column_beats())}
-        return [column_of[piece.beat] for piece in self.shown.pieces()]
+        return [column_of[piece.beat] for piece in self.pieces()]
 
     def column_x(self, column):
         """The x position of a column (0 = first)."""
@@ -316,7 +362,7 @@ class StaffWidget(QWidget):
     def note_columns(self):
         """For each note, the list of columns its pieces are drawn in."""
         columns = [[] for _ in self.shown.notes]  # one empty list per note
-        for piece, column in zip(self.shown.pieces(), self.piece_columns()):
+        for piece, column in zip(self.pieces(), self.piece_columns()):
             columns[piece.note_index].append(column)
         return columns
 
@@ -339,7 +385,7 @@ class StaffWidget(QWidget):
         column = self.column_at(x)
         if column is None:
             return None, None
-        for piece, piece_column in zip(self.shown.pieces(), self.piece_columns()):
+        for piece, piece_column in zip(self.pieces(), self.piece_columns()):
             if piece_column == column:
                 return piece, column
         return None, None
@@ -417,7 +463,10 @@ class StaffWidget(QWidget):
             alter = self.settings.alter
         if step is not None:
             step, alter = self.to_written(step, alter)  # what you clicked is what's shown
-        note = Note(step, self.settings.duration, alter)
+        duration = self.settings.duration
+        if self.settings.dotted and duration in DOTTABLE:
+            duration *= 1.5  # a dotted note: 1½ times as long
+        note = Note(step, duration, alter)
         self.add_requested.emit(note)
         self.preview_note(note)
 
@@ -478,7 +527,7 @@ class StaffWidget(QWidget):
         # (On a grand staff the GrandStaffWidget behind us paints the paper
         # and the brace; we leave our background see-through.)
 
-        pieces = self.shown.pieces()
+        pieces = self.pieces()
 
         # The cursor goes first, so the staff and notes are drawn on top of it.
         # It covers every column of the playing note (all its tied pieces).
@@ -498,13 +547,14 @@ class StaffWidget(QWidget):
             painter.drawLine(QPointF(MARGIN, y), QPointF(right_edge, y))
         self.draw_clef(painter)
         self.draw_key_signature(painter)
+        self.draw_time_signature(painter)
 
         # Draw every piece. The whole picture is redrawn from self.part each
         # time, so the model is the "truth" and the picture just shows it.
         # The model decides how notes are split and tied (pieces) and which
         # ♯ ♭ ♮ signs are needed (accidental_signs).
         # enumerate gives each item along with its position: (0, first), (1, second), ...
-        signs = self.shown.accidental_signs(self.key)
+        signs = self.shown.accidental_signs(self.key, self.measure_beats)
         piece_columns = self.piece_columns()
         bar_lines = []
         for i, piece in enumerate(pieces):
@@ -632,18 +682,33 @@ class StaffWidget(QWidget):
         painter.setBrush(self.ink)
         painter.drawPath(path)
 
+    def draw_dot(self, painter, x, step):
+        """A rhythm dot (it makes a note 1½ times as long)."""
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(self.ink)
+        radius = LINE_SPACING * 0.15
+        painter.drawEllipse(QPointF(x, step_to_y(step)), radius, radius)
+
     def draw_note(self, painter, x, note, duration):
         """Draw a note (or one piece of it) at x, shaped by `duration`.
 
         `duration` is passed separately because a tied note's pieces can be
         shorter than the note itself.
         """
+        # A dotted value is drawn as the plain value plus a dot after it.
+        duration, dotted = undotted(duration)
         if note.is_rest:
             self.draw_rest(painter, x, duration)
+            if dotted:
+                self.draw_dot(painter, x + LINE_SPACING * 0.8, 5)  # in the third space
             return
 
         y = step_to_y(note.step)
         self.draw_ledger_lines(painter, x, note.step)
+        if dotted:
+            # The dot goes in a space: a note on a line gets its dot just above.
+            dot_step = note.step if note.step % 2 else note.step + 1
+            self.draw_dot(painter, x + NOTE_HEAD_WIDTH / 2 + 5, dot_step)
 
         is_cymbal = (self.part.instrument.is_drums
                      and DRUM_MAP[nearest_drum_step(note.step)].cymbal)
@@ -888,6 +953,14 @@ class MainWindow(QMainWindow):
         # "connect" is how we say "when this happens, call that."
         self.duration_group.triggered.connect(self.on_duration_chosen)
 
+        # The dot: makes the next half or quarter notes 1½ times as long.
+        self.dot_action = QAction("Dot (.)", self)
+        self.dot_action.setToolTip("Dotted notes: 1½ times as long (half and quarter notes)")
+        self.dot_action.setCheckable(True)
+        self.dot_action.setShortcut(".")
+        self.dot_action.toggled.connect(self.on_dot_toggled)
+        toolbar.addAction(self.dot_action)
+
         # The Rest button is a separate on/off switch, not part of the group,
         # so it combines with whichever duration is chosen.
         toolbar.addSeparator()  # a small divider line in the toolbar
@@ -913,7 +986,8 @@ class MainWindow(QMainWindow):
         self.accidental_group.triggered.connect(self.on_accidental_chosen)
 
         toolbar.addSeparator()
-        self.delete_last_action = QAction("Delete Last (Backspace)", self)
+        self.delete_last_action = QAction("Delete Last", self)
+        self.delete_last_action.setToolTip("Delete the last note (Backspace)")
         self.delete_last_action.setShortcut("Backspace")
         self.delete_last_action.triggered.connect(self.on_delete_last)
         toolbar.addAction(self.delete_last_action)
@@ -968,8 +1042,11 @@ class MainWindow(QMainWindow):
         self.tempo_slider.valueChanged.connect(self.on_tempo_changed)
         self.on_tempo_changed(self.tempo_slider.value())  # show the starting value
 
+        # A third row for settings of the whole piece: key, time, and how it's shown.
+        self.addToolBarBreak()
+        toolbar = self.addToolBar("Score")
+
         # Key signature: a drop-down list of all 15 keys, 7 flats to 7 sharps.
-        toolbar.addSeparator()
         toolbar.addWidget(QLabel(" Key "))
         self.key_box = QComboBox()
         for key in sorted(KEY_NAMES):  # sorted: -7, -6, ... 0 ... 7
@@ -978,6 +1055,19 @@ class MainWindow(QMainWindow):
         self.key_box.setFocusPolicy(Qt.NoFocus)  # keep Space for play/pause
         self.key_box.currentIndexChanged.connect(self.on_key_chosen)
         toolbar.addWidget(self.key_box)
+
+        # Time signature: the common ones, e.g. "3/4", "6/8".
+        toolbar.addSeparator()
+        toolbar.addWidget(QLabel(" Time "))
+        self.time_box = QComboBox()
+        # Entry i of the box is TIME_SIGNATURES[i]. (Storing the tuple itself
+        # with addItem doesn't work: Qt converts it, and findData can't match it.)
+        for top, bottom in TIME_SIGNATURES:
+            self.time_box.addItem(f"{top}/{bottom}")
+        self.time_box.setCurrentIndex(TIME_SIGNATURES.index(self.score.time_signature))
+        self.time_box.setFocusPolicy(Qt.NoFocus)  # keep Space for play/pause
+        self.time_box.currentIndexChanged.connect(self.on_time_signature_chosen)
+        toolbar.addWidget(self.time_box)
 
         # Concert pitch: a view switch, shared by this toolbar and the View menu.
         toolbar.addSeparator()
@@ -1289,6 +1379,12 @@ class MainWindow(QMainWindow):
     def on_duration_chosen(self, action):
         """Slot: called by Qt when a duration button is chosen."""
         self.settings.duration = action.data()
+        # Only half and quarter notes can be dotted; gray out Dot for the others.
+        self.dot_action.setEnabled(action.data() in DOTTABLE)
+
+    def on_dot_toggled(self, checked):
+        """Slot: the Dot button was switched on or off."""
+        self.settings.dotted = checked
 
     def on_accidental_chosen(self, action):
         """Slot: ♮, ♯ or ♭ was chosen for the next notes."""
@@ -1340,6 +1436,23 @@ class MainWindow(QMainWindow):
         if state == STOPPED:
             for staff in self.all_staffs():
                 staff.set_playing_index(None)  # hide every cursor
+
+    def on_time_signature_chosen(self, index):
+        """Slot: a time signature was picked in the Time drop-down."""
+        time_signature = TIME_SIGNATURES[index]
+        if time_signature != self.score.time_signature:  # code setting the box is no new edit
+            self.undo_stack.push(
+                ChangeTimeSignature(self, self.score.time_signature, time_signature))
+
+    def set_time_signature(self, time_signature):
+        """Change the time signature, the Time drop-down, and every staff.
+
+        The notes don't change; every staff simply re-bars them.
+        """
+        self.score.time_signature = time_signature  # first, so the drop-down sees no new edit
+        self.time_box.setCurrentIndex(TIME_SIGNATURES.index(time_signature))
+        for staff in self.all_staffs():
+            self.update_staff_display(staff)
 
     def on_key_chosen(self, index):
         """Slot: a key was picked in the Key drop-down."""
@@ -1433,7 +1546,7 @@ class MainWindow(QMainWindow):
         offset = part.instrument.concert_offset if self.concert_pitch else 0
         # A part shown at concert pitch uses the piece's real key; otherwise its own.
         key = self.score.key if offset else part.written_key(self.score.key)
-        staff.set_display(offset, key)
+        staff.set_display(offset, key, self.score.time_signature)
 
     def on_concert_pitch_toggled(self, checked):
         """Slot: the Concert Pitch switch was flipped (a view setting: not saved, not undoable)."""
@@ -1466,6 +1579,7 @@ class MainWindow(QMainWindow):
         self.tempo_slider.setValue(score.tempo_bpm)
         self.on_tempo_changed(score.tempo_bpm)  # updates the label even if the value didn't change
         self.set_key(score.key)
+        self.set_time_signature(score.time_signature)
         # A different score: the old undo history no longer applies. clear()
         # also marks the stack clean, so there's nothing unsaved.
         self.undo_stack.clear()
@@ -1578,7 +1692,7 @@ def main():
     app = QApplication(sys.argv)  # every Qt program needs exactly one of these
 
     window = MainWindow()
-    window.resize(800, 500)  # tall enough for a grand staff's two staves
+    window.resize(800, 540)  # tall enough for 3 toolbar rows and a grand staff's two staves
     window.show()
 
     # Start the event loop: Qt now waits for clicks, key presses, and repaint

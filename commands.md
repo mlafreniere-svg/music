@@ -132,10 +132,12 @@ Keyboard shortcuts inside the app:
 |---|---|
 | `1` `2` `3` `4` | Choose whole / half / quarter / eighth. |
 | `R` | Turn rest mode on/off (clicks add rests of the chosen duration). |
+| `.` | Dot on/off: half and quarter notes become dotted (1½ times as long). |
 | `K` | New notes follow the key signature (e.g. F becomes F♯ in G major). The default. |
 | `N` `S` `F` | Natural / sharp / flat for the next notes you place. |
-| Key drop-down | Choose the key signature (Playback toolbar). Notes keep their pitches; signs update. |
-| Concert Pitch | Show transposing instruments at the pitch they sound (Playback toolbar, or View menu / `Alt+V`). |
+| Key drop-down | Choose the key signature (Score toolbar). Notes keep their pitches; signs update. |
+| Time drop-down | Choose the time signature (Score toolbar). Notes stay the same; bar lines and ties move. |
+| Concert Pitch | Show transposing instruments at the pitch they sound (Score toolbar, or View menu / `Alt+V`). |
 | Point at a note + `+` (or `=`) | Raise that note a half step (♭ → ♮ → ♯). |
 | Point at a note + `-` | Lower that note a half step (♯ → ♮ → ♭). |
 | `Backspace` | Delete the last note (on a grand staff: of the staff you last clicked). |

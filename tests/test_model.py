@@ -8,9 +8,10 @@ failed and shows the values involved.
 import pytest
 
 from model import (
-    EIGHTH, FLAT, HALF, INSTRUMENTS, KEY_NAMES, NATURAL, PIANO, QUARTER, SHARP, WHOLE,
+    DOTTED_HALF, DOTTED_QUARTER, EIGHTH, FLAT, HALF, INSTRUMENTS, KEY_NAMES, NATURAL, PIANO,
+    QUARTER, SHARP, WHOLE, undotted,
     Note, Part, Score, find_instrument, key_alter, key_name, letter_of, nearest_drum_step,
-    rewrite_for_instrument, split_duration, step_to_midi, transpose_note,
+    measure_length, rewrite_for_instrument, split_duration, step_to_midi, transpose_note,
 )
 
 
@@ -129,11 +130,11 @@ def test_a_note_across_the_bar_line_is_split_and_tied():
 
 
 def test_odd_lengths_become_tied_note_values():
-    # A whole note starting on beat 2: 3 beats left (half + quarter, tied), then 1 more.
+    # A whole note starting on beat 2: 3 beats left in the measure (a dotted
+    # half), tied over the bar line to 1 more beat (a quarter).
     part = Part([Note(0), Note(0, WHOLE)])
     assert describe(part)[1:] == [
-        (1, HALF, True, False),
-        (1, QUARTER, True, True),
+        (1, DOTTED_HALF, True, True),
         (1, QUARTER, False, False),
     ]
 
@@ -148,10 +149,57 @@ def test_only_the_first_piece_is_marked_first():
     assert [p.first for p in part.pieces()] == [True, True, True, True, False]
 
 
+def test_measure_length():
+    assert measure_length((4, 4)) == 4
+    assert measure_length((3, 4)) == 3
+    assert measure_length((6, 8)) == 3    # six eighths = three quarters
+    assert measure_length((12, 8)) == 6
+    assert measure_length((2, 2)) == 4    # two halves
+    assert Score(time_signature=(5, 4)).measure_beats == 5
+
+
+def test_three_four_puts_bar_lines_every_three_beats():
+    part = Part([Note(0)] * 6)
+    assert [p.ends_measure for p in part.pieces(3)] == [False, False, True] * 2
+
+
+def test_changing_time_signature_rebars_the_same_notes():
+    # A half note on beat 3: fits in 4/4, but crosses the bar line in 3/4.
+    part = Part([Note(0), Note(0), Note(0, HALF)])
+    assert len(part.pieces(4)) == 3
+    in_three = part.pieces(3)
+    assert [(p.note_index, p.duration, p.tied) for p in in_three[2:]] == [
+        (2, QUARTER, True), (2, QUARTER, False)]
+
+
+def test_accidentals_reset_at_three_four_bar_lines():
+    notes = [Note(1, alter=SHARP), Note(0), Note(0), Note(1, alter=SHARP)]
+    assert part_signs(notes, measure_beats=3) == [SHARP, None, None, SHARP]
+    assert part_signs(notes, measure_beats=4) == [SHARP, None, None, None]
+
+
+def part_signs(notes, measure_beats):
+    return Part(notes).accidental_signs(0, measure_beats)
+
+
 def test_split_duration():
-    assert split_duration(3.0) == [HALF, QUARTER]
-    assert split_duration(1.5) == [QUARTER, EIGHTH]
+    assert split_duration(3.0) == [DOTTED_HALF]      # one dotted half, not half + quarter
+    assert split_duration(1.5) == [DOTTED_QUARTER]
+    assert split_duration(2.5) == [HALF, EIGHTH]
     assert split_duration(4.0) == [WHOLE]
+
+
+def test_undotted():
+    assert undotted(DOTTED_HALF) == (HALF, True)
+    assert undotted(DOTTED_QUARTER) == (QUARTER, True)
+    assert undotted(QUARTER) == (QUARTER, False)
+
+
+def test_six_eight_dotted_quarters_fill_a_measure():
+    part = Part([Note(0, DOTTED_QUARTER)] * 4)
+    pieces = part.pieces(measure_length((6, 8)))
+    assert [p.duration for p in pieces] == [DOTTED_QUARTER] * 4   # no ties needed
+    assert [p.ends_measure for p in pieces] == [False, True, False, True]
 
 
 # --- Sharps, flats, and key signatures -----------------------------------

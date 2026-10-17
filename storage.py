@@ -13,18 +13,19 @@ conversion can be tested without touching any files.
 import json
 from pathlib import Path
 
-from model import Note, Part, Score, find_instrument
+from model import COMMON_TIME, Note, Part, Score, find_instrument
 
 FILE_EXTENSION = ".music.json"
 FORMAT_NAME = "music-staff"  # identifies our files among all JSON files
-FORMAT_VERSION = 3           # bump this if the layout of the file ever changes
+FORMAT_VERSION = 4           # bump this if the layout of the file ever changes
 # Version history:
 #   1  tempo, parts, notes (step + duration)
 #   2  adds each note's "alter" (sharp/flat) and the score's "key" signature.
 #      Version 1 files still load: their notes are natural, in C major.
 #   3  adds "lower_notes" for grand-staff parts (the left hand).
 #      Older files have no grand staffs, so they load unchanged.
-READABLE_VERSIONS = (1, 2, 3)
+#   4  adds the "time_signature", e.g. [3, 4]. Older files are in 4/4.
+READABLE_VERSIONS = (1, 2, 3, 4)
 
 
 def notes_to_list(notes):
@@ -44,6 +45,7 @@ def score_to_dict(score):
         "version": FORMAT_VERSION,
         "tempo_bpm": score.tempo_bpm,
         "key": score.key,
+        "time_signature": list(score.time_signature),  # JSON has lists, not tuples
         "parts": [part_to_dict(part) for part in score.parts],
     }
 
@@ -74,7 +76,12 @@ def score_from_dict(data):
 
     # .get(key, default) gives the default when the key is missing, which is
     # how version 1 files (no key, no alter) still load.
-    score = Score(tempo_bpm=data["tempo_bpm"], key=data.get("key", 0))
+    score = Score(
+        tempo_bpm=data["tempo_bpm"],
+        key=data.get("key", 0),
+        # tuple(...) turns the saved list [3, 4] back into (3, 4).
+        time_signature=tuple(data.get("time_signature", COMMON_TIME)),
+    )
     for part_data in data["parts"]:
         part = Part(instrument=find_instrument(part_data["instrument"]))  # grand: makes .lower
         part.notes = notes_from_list(part_data["notes"])

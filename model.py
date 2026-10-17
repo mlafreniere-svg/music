@@ -14,7 +14,33 @@ HALF = 2.0
 QUARTER = 1.0
 EIGHTH = 0.5
 
-BEATS_PER_MEASURE = 4  # 4/4 time: four quarter-note beats in every measure
+# A dot after a note makes it 1½ times as long.
+DOTTED_HALF = HALF * 1.5        # 3 beats
+DOTTED_QUARTER = QUARTER * 1.5  # 1½ beats
+DOTTABLE = (HALF, QUARTER)  # (a dotted eighth would need sixteenth notes; not supported yet)
+
+
+def undotted(duration):
+    """Split a written note value into (plain value, dotted?): 3.0 -> (2.0, True)."""
+    if duration in (DOTTED_HALF, DOTTED_QUARTER):
+        return duration / 1.5, True
+    return duration, False
+
+# Time signatures: (top number, bottom number). The top says how many
+# counts are in a measure; the bottom says which note value gets one count
+# (4 = quarter note, 8 = eighth, 2 = half). Our "beats" are always quarter
+# notes, so 6/8 = six eighths = 3 quarter-note beats per measure.
+TIME_SIGNATURES = [(2, 4), (3, 4), (4, 4), (5, 4), (6, 8), (9, 8), (12, 8), (2, 2)]
+COMMON_TIME = (4, 4)
+
+
+def measure_length(time_signature):
+    """How many quarter-note beats fit in one measure: 3/4 -> 3, 6/8 -> 3, 2/2 -> 4."""
+    top, bottom = time_signature
+    return top * 4 / bottom
+
+
+BEATS_PER_MEASURE = measure_length(COMMON_TIME)  # the default: 4/4
 
 # --- Pitch ---------------------------------------------------------------
 # MIDI numbers every key on a piano: 60 is middle C (C4), and each +1 is one
@@ -430,13 +456,14 @@ class Part:
         if self.notes:  # an empty list counts as False, so this means "if not empty"
             self.notes.pop()  # pop() removes the last item of a list
 
-    def accidental_signs(self, key=0):
+    def accidental_signs(self, key=0, measure_beats=BEATS_PER_MEASURE):
         """Which accidental sign to draw in front of each note, if any.
 
         Returns one entry per note: None (draw nothing), or SHARP, FLAT, or
         NATURAL (draw that sign). Standard rule: the key signature says what
         each letter normally is; an accidental changes that line or space
         for the rest of its measure; a bar line resets everything.
+        `measure_beats` is the measure's length (see measure_length).
         """
         if self.instrument.is_drums:
             return [None] * len(self.notes)  # drums have no sharps or flats
@@ -445,8 +472,8 @@ class Part:
         beats = 0.0
         measure = 0
         for note in self.notes:
-            if beats // BEATS_PER_MEASURE != measure:  # crossed into a new measure
-                measure = beats // BEATS_PER_MEASURE
+            if beats // measure_beats != measure:  # crossed into a new measure
+                measure = beats // measure_beats
                 current = {}  # back to the key signature
             sign = None
             if not note.is_rest:
@@ -458,7 +485,7 @@ class Part:
             beats += note.duration
         return signs
 
-    def pieces(self):
+    def pieces(self, measure_beats=BEATS_PER_MEASURE):
         """How to *write* the notes: each note split into drawable pieces.
 
         A note that doesn't fit in what's left of its measure is split at the
@@ -468,7 +495,8 @@ class Part:
         Rests are split the same way, but rests are never tied.
 
         The notes themselves don't change: a tied half note still *sounds*
-        like one half note. This only decides how it's drawn.
+        like one half note. This only decides how it's drawn. So changing the
+        time signature (`measure_beats`) simply re-bars the same notes.
         """
         pieces = []
         beat = 0.0
@@ -477,7 +505,7 @@ class Part:
             remaining = note.duration
             while remaining > 0:
                 # % is the remainder: how far into the current measure we are.
-                room = BEATS_PER_MEASURE - beat % BEATS_PER_MEASURE
+                room = measure_beats - beat % measure_beats
                 for length in split_duration(min(remaining, room)):
                     beat += length
                     remaining -= length
@@ -487,7 +515,7 @@ class Part:
                         duration=length,
                         first=len(pieces) == first_piece,
                         tied=False,
-                        ends_measure=beat % BEATS_PER_MEASURE == 0,
+                        ends_measure=beat % measure_beats == 0,
                     ))
             if not note.is_rest:
                 # Tie every piece of this note to the next one, except the last.
@@ -502,13 +530,14 @@ class Piece:
 
     note_index: int     # which note this is a piece of
     beat: float         # when the piece starts (lines staves up on a grand staff)
-    duration: float     # a single note value: WHOLE, HALF, QUARTER, or EIGHTH
+    duration: float     # a single note value (see NOTE_VALUES), maybe dotted
     first: bool         # the note's first piece (where its ♯ ♭ ♮ goes)
     tied: bool          # a tie joins this piece to the next one
     ends_measure: bool  # a bar line comes right after this piece
 
 
-NOTE_VALUES = [WHOLE, HALF, QUARTER, EIGHTH]  # longest first
+# Every value a single drawn note can have, longest first (dotted ones included).
+NOTE_VALUES = [WHOLE, DOTTED_HALF, HALF, DOTTED_QUARTER, QUARTER, EIGHTH]
 
 
 def split_duration(beats):
@@ -540,6 +569,12 @@ class Score:
     parts: list[Part] = field(default_factory=list)
     tempo_bpm: int = 100  # beats (quarter notes) per minute; saved with the piece
     key: int = 0          # key signature: + sharps, - flats (0 = C major, no sharps or flats)
+    time_signature: tuple = COMMON_TIME  # (top, bottom), e.g. (3, 4); see TIME_SIGNATURES
+
+    @property
+    def measure_beats(self):
+        """Quarter-note beats per measure, from the time signature."""
+        return measure_length(self.time_signature)
 
     def is_audible(self, part_index):
         """Should this part be heard, given everyone's Mute and Solo buttons?

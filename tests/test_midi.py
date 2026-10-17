@@ -90,6 +90,14 @@ def test_tempo_time_and_key_signature():
     assert struct.unpack(">bB", conductor[0x59]) == (-2, 0)     # 2 flats, major
 
 
+def test_time_signature_six_eight():
+    score = Score(time_signature=(6, 8))
+    score.add_part(find_instrument("Violin"))
+    _, tracks = read_midi(score_to_midi(score))
+    conductor = dict((event[1], event[3:]) for _, event in tracks[0] if event[0] == 0xFF)
+    assert conductor[0x58][:2] == bytes([6, 3])  # 6 over 2**3 = 8
+
+
 def test_notes_have_the_right_times_and_pitches():
     score = Score()
     violin = score.add_part(find_instrument("Violin"))

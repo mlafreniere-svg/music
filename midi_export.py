@@ -13,7 +13,7 @@ signature; then one track per part holds its name, instrument, and notes.
 
 import struct
 
-from model import BEATS_PER_MEASURE
+import math
 
 TICKS_PER_BEAT = 480  # how finely time is counted: 480 ticks per quarter note
 VELOCITY = 100        # how hard each note is played, 0-127
@@ -63,9 +63,11 @@ def conductor_track(score):
     """Track 0: tempo, time signature, and key signature, all at the start."""
     microseconds_per_beat = round(60_000_000 / score.tempo_bpm)  # _ makes big numbers readable
     tempo = meta_event(0x51, microseconds_per_beat.to_bytes(3, "big"))
-    # Time signature: 4/4. Written as numerator, log2(denominator), then two
-    # standard values (24 MIDI clocks per click, 8 32nd notes per quarter).
-    time_signature = meta_event(0x58, bytes([BEATS_PER_MEASURE, 2, 24, 8]))
+    # Time signature: the top number, then the bottom number written as a
+    # power of 2 (4 -> 2, 8 -> 3, since 2**3 = 8), then two standard values
+    # (24 MIDI clocks per click, 8 32nd notes per quarter).
+    top, bottom = score.time_signature
+    time_signature = meta_event(0x58, bytes([top, int(math.log2(bottom)), 24, 8]))
     # Key signature: number of sharps (negative = flats) as a signed byte, then 0 = major.
     key_signature = meta_event(0x59, struct.pack(">bB", score.key, 0))
     return track_chunk([(0, 0, tempo), (0, 0, time_signature), (0, 0, key_signature)])

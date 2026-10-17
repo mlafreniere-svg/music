@@ -16,6 +16,7 @@ can show its change on screen:
     view.remove_part_at(index)      remove the tab (and part) at `index`
     view.set_tempo(bpm)             change the tempo and move the slider
     view.set_key(key)               change the key signature and the Key dropdown
+    view.set_time_signature(ts)     change the time signature and the Time dropdown
 """
 
 from PySide6.QtGui import QUndoCommand
@@ -174,6 +175,22 @@ class ChangeKey(QUndoCommand):
 
     def undo(self):
         self.view.set_key(self.old_key)
+
+
+class ChangeTimeSignature(QUndoCommand):
+    """Change the time signature. The notes stay the same; bar lines move."""
+
+    def __init__(self, view, old, new):
+        super().__init__("Change time signature")
+        self.view = view
+        self.old = old
+        self.new = new
+
+    def redo(self):
+        self.view.set_time_signature(self.new)
+
+    def undo(self):
+        self.view.set_time_signature(self.old)
 
 
 class ChangeTempo(QUndoCommand):
