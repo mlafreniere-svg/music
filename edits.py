@@ -11,6 +11,7 @@ remembers itself and its position, a moved note remembers both pitches.
 Every command also gets a "view" (the main window) with these methods, so it
 can show its change on screen:
     view.part_changed(part, index)  redraw the part's tab; show note `index`
+    view.instrument_changed(part)   relabel the part's tab and redraw its clef
     view.insert_part(index, part)   add a tab for this part at `index`
     view.remove_part_at(index)      remove the tab (and part) at `index`
     view.set_tempo(bpm)             change the tempo and move the slider
@@ -18,7 +19,7 @@ can show its change on screen:
 
 from PySide6.QtGui import QUndoCommand
 
-from model import Part
+from model import Part, clef_change_shift
 
 
 class AddNote(QUndoCommand):
@@ -78,6 +79,37 @@ class MoveNote(QUndoCommand):
     def undo(self):
         self.part.notes[self.index].step = self.old_step
         self.view.part_changed(self.part, self.index)
+
+
+class ChangeInstrument(QUndoCommand):
+    """Switch a part to another instrument.
+
+    If the clef changes, the notes keep their letter names and move by
+    whole octaves to fit the new staff (see clef_change_shift).
+    """
+
+    def __init__(self, view, part, instrument):
+        super().__init__(f"Change to {instrument.name}")
+        self.view = view
+        self.part = part
+        self.old_instrument = part.instrument
+        self.new_instrument = instrument
+        pitched = [note.step for note in part.notes if not note.is_rest]
+        self.shift = clef_change_shift(pitched, part.clef, instrument.clef)
+
+    def apply(self, instrument, shift):
+        """Set the instrument and move every pitched note by `shift` steps."""
+        self.part.instrument = instrument
+        for note in self.part.notes:
+            if not note.is_rest:
+                note.step += shift  # += adds to the value already there
+        self.view.instrument_changed(self.part)
+
+    def redo(self):
+        self.apply(self.new_instrument, self.shift)
+
+    def undo(self):
+        self.apply(self.old_instrument, -self.shift)  # move back the same distance
 
 
 class AddPart(QUndoCommand):

@@ -17,7 +17,9 @@ from PySide6.QtWidgets import (
 from model import (  # our own model.py
     EIGHTH, HALF, INSTRUMENTS, PIANO, QUARTER, WHOLE, Note, Score,
 )
-from edits import AddNote, AddPart, ChangeTempo, MoveNote, RemoveNote, RemovePart
+from edits import (
+    AddNote, AddPart, ChangeInstrument, ChangeTempo, MoveNote, RemoveNote, RemovePart,
+)
 from player import MAX_PARTS, PAUSED, PLAYING, STOPPED, Player
 from storage import FILE_EXTENSION, display_name, load_score, save_score
 
@@ -473,17 +475,19 @@ class MainWindow(QMainWindow):
         # The "+ Instrument" button, in the corner beside the tabs. Clicking it
         # opens a menu with one entry per instrument.
         instrument_menu = QMenu(self)
-        for instrument in INSTRUMENTS:
-            if instrument.name == "Piano (bass)":
-                instrument_menu.addSeparator()  # a divider between treble and bass
-            action = instrument_menu.addAction(f"{instrument.name}  ({instrument.clef})")
-            action.setData(instrument)  # remember which instrument this entry means
+        self.fill_instrument_menu(instrument_menu)
         instrument_menu.triggered.connect(self.on_add_instrument)
         add_button = QToolButton()
         add_button.setText("+ Instrument")
         add_button.setMenu(instrument_menu)
         add_button.setPopupMode(QToolButton.InstantPopup)  # open the menu on click
         self.tabs.setCornerWidget(add_button, Qt.TopRightCorner)
+
+        # Right-clicking a tab opens a menu to change its instrument.
+        # CustomContextMenu means "tell us about right-clicks, we'll show the menu".
+        tab_bar = self.tabs.tabBar()
+        tab_bar.setContextMenuPolicy(Qt.CustomContextMenu)
+        tab_bar.customContextMenuRequested.connect(self.on_tab_right_click)
 
         self.add_tab(PIANO)  # every score starts with a piano
 
@@ -709,6 +713,35 @@ class MainWindow(QMainWindow):
             return
         self.undo_stack.push(AddPart(self, self.score, action.data()))
 
+    def fill_instrument_menu(self, menu, current=None):
+        """Add one entry per instrument to a menu, treble first, then bass.
+
+        If `current` is given, that instrument's entry gets a check mark.
+        """
+        for instrument in INSTRUMENTS:
+            if instrument.name == "Piano (bass)":
+                menu.addSeparator()  # a divider between treble and bass
+            action = menu.addAction(f"{instrument.name}  ({instrument.clef})")
+            action.setData(instrument)  # remember which instrument this entry means
+            if current is not None:
+                action.setCheckable(True)
+                action.setChecked(instrument == current)
+
+    def on_tab_right_click(self, pos):
+        """Slot: a tab was right-clicked. Offer to change its instrument."""
+        index = self.tabs.tabBar().tabAt(pos)  # which tab is at that point (-1: none)
+        if index < 0:
+            return
+        part = self.score.parts[index]
+        menu = QMenu(self)
+        menu.addSection("Change instrument")  # a heading at the top of the menu
+        self.fill_instrument_menu(menu, current=part.instrument)
+        # exec() shows the menu where the mouse is and waits for a choice.
+        # It returns the chosen action, or None if the menu was dismissed.
+        chosen = menu.exec(self.tabs.tabBar().mapToGlobal(pos))
+        if chosen is not None and chosen.data() != part.instrument:
+            self.undo_stack.push(ChangeInstrument(self, part, chosen.data()))
+
     def on_close_tab(self, index):
         """Slot: the x on a tab was clicked."""
         if self.tabs.count() == 1:
@@ -725,6 +758,17 @@ class MainWindow(QMainWindow):
                 self.tabs.setCurrentIndex(tab_index)  # undo shows you what it undid
                 staff.refresh()
                 staff.scroll_to.emit(staff.note_x(max(index, 0)))
+                return
+
+    def instrument_changed(self, part):
+        """A part switched instruments: relabel its tab and redraw (the clef may differ)."""
+        self.stop_if_playing()  # the player picked the old instrument when it started
+        for tab_index, staff in enumerate(self.all_staffs()):
+            if staff.part is part:
+                self.tabs.setTabText(tab_index, "")  # so its own old name doesn't count as taken
+                self.tabs.setTabText(tab_index, self.unused_tab_label(part.instrument.name))
+                self.tabs.setCurrentIndex(tab_index)
+                staff.refresh()
                 return
 
     def insert_part(self, index, part):

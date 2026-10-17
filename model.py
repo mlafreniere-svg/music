@@ -34,6 +34,31 @@ CLEF_BOTTOM_LINE = {
 }
 
 
+STAFF_MIDDLE_STEP = 4  # the middle line of the staff
+
+
+def clef_change_shift(steps, old_clef, new_clef):
+    """How far (in staff steps) to move notes when their clef changes.
+
+    The notes keep their letter names (an E stays an E) and move by whole
+    octaves to sit as close as possible to the middle of the new staff.
+    `steps` are the pitched notes' steps (no rests).
+    """
+    if old_clef == new_clef:
+        return 0
+    # Moving by this many steps would keep the exact same pitches:
+    # treble -> bass is 2 - (-10) = 12 steps (the same sound sits higher on a bass staff).
+    same_pitch = CLEF_BOTTOM_LINE[old_clef] - CLEF_BOTTOM_LINE[new_clef]
+    if steps:
+        average = sum(steps) / len(steps)
+    else:
+        average = STAFF_MIDDLE_STEP  # no notes: any octave will do
+    # An octave is 7 letters (steps). Take away whole octaves until the
+    # notes' average is as close as possible to the middle line.
+    octaves = round((average + same_pitch - STAFF_MIDDLE_STEP) / 7)
+    return same_pitch - 7 * octaves
+
+
 def step_to_midi(step, clef="treble"):
     """Convert a staff step (0 = bottom line) to a MIDI pitch number."""
     letters_above_c4 = step + CLEF_BOTTOM_LINE[clef]

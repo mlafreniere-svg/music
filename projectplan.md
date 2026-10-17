@@ -73,10 +73,12 @@ Completed milestones are marked with ✅.
 
 Ideas we've agreed on but are deliberately leaving out for now. Revisit them after the milestones are done.
 
-- **Show and choose the instrument:** playback is Acoustic Grand Piano, hard-coded in `player.py` (`PIANO = 0`, General MIDI program 0), and the app never says so. When milestone 5 adds instruments, make the current instrument visible on each tab and let the user choose it. (Raised during step 4c.)
+- **Show and choose the instrument:** playback is Acoustic Grand Piano, hard-coded in `player.py` (`PIANO = 0`, General MIDI program 0), and the app never says so. When milestone 5 adds instruments, make the current instrument visible on each tab and let the user choose it. (Raised during step 4c.) ✅ *Done. Milestone 5 labeled the tabs and let you pick the instrument when adding one; now right-clicking a tab changes its instrument (undoable). On a clef change, notes keep their letter names and move by whole octaves to fit the new staff.*
 - **Grand staff for piano:** piano gets two joined staves (treble + bass) in one part. Deferred in milestone 5: piano uses treble clef, and a separate "Piano (bass)" tab covers low notes. (Decided at the start of milestone 5.)
 - **Transposing instruments:** trumpet, clarinet, saxophone, guitar, and double bass are written at a different pitch than they sound. Milestone 5's instrument list leaves them out; adding them means each instrument needs a "transposition" in half steps. (Decided at the start of milestone 5.)
 - **Ties across bar lines:** a note too long for what's left of its measure should be split at the bar line into two notes joined by a tie, e.g. a half note starting on beat 4 becomes two tied quarters. For now, the bar line goes after the note and that measure has too many beats. (Found in step 3c.)
+- **Sharps, flats, and key signatures:** "minimal notation" left them out, so only natural notes (the piano's white keys) can be written. Needs accidentals on notes (♯ ♭ ♮), drawing them, pitch math that includes them, and saving them; key signatures come after. Transposing instruments depend on this. (Noted after milestone 7.)
+- **MIDI export:** save a standard `.mid` file that MuseScore, a DAW, or any music program can open. Was "out of scope for now" in the original plan; small now that save/load exists. Exported files are songs, so they stay out of git like `saved_music`. (Noted after milestone 7.)
 
 
 

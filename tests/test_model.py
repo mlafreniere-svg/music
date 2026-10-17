@@ -9,7 +9,7 @@ import pytest
 
 from model import (
     EIGHTH, HALF, INSTRUMENTS, PIANO, QUARTER, WHOLE,
-    Note, Part, Score, find_instrument, step_to_midi,
+    Note, Part, Score, clef_change_shift, find_instrument, step_to_midi,
 )
 
 
@@ -115,6 +115,36 @@ def test_measure_ends_when_a_note_overflows():
     # (Ties will handle this properly later; see projectplan.md.)
     part = Part([Note(0), Note(0), Note(0), Note(0, HALF)])
     assert part.measure_ends() == [3]
+
+
+# --- Changing clef -------------------------------------------------------
+
+def test_same_clef_means_no_shift():
+    assert clef_change_shift([0, 4, 8], "treble", "treble") == 0
+
+
+def test_clef_change_keeps_letter_names():
+    steps = [0, 2, 4, 6, 8]  # E G B D F in treble
+    shift = clef_change_shift(steps, "treble", "bass")
+    for step in steps:
+        old = step_to_midi(step, "treble")
+        new = step_to_midi(step + shift, "bass")
+        assert (old - new) % 12 == 0  # whole octaves apart: same letter name
+
+
+def test_clef_change_lands_near_the_middle_of_the_staff():
+    steps = [0, 2, 4, 6, 8]  # centered on the middle line in treble
+    shift = clef_change_shift(steps, "treble", "bass")
+    new_average = sum(s + shift for s in steps) / len(steps)
+    assert abs(new_average - 4) <= 3.5  # within half an octave of the middle line
+
+
+def test_clef_change_there_and_back_returns_home():
+    steps = [-2, 3, 10]
+    there = clef_change_shift(steps, "treble", "bass")
+    moved = [s + there for s in steps]
+    back = clef_change_shift(moved, "bass", "treble")
+    assert [s + back for s in moved] == steps
 
 
 # --- Instruments and scores ----------------------------------------------
