@@ -96,26 +96,36 @@ def key_alter(letter, key):
     return NATURAL
 
 
-def clef_change_shift(steps, old_clef, new_clef):
-    """How far (in staff steps) to move notes when their clef changes.
-
-    The notes keep their letter names (an E stays an E) and move by whole
-    octaves to sit as close as possible to the middle of the new staff.
-    `steps` are the pitched notes' steps (no rests).
-    """
-    if old_clef == new_clef:
+def fit_octave_shift(steps):
+    """How far (in whole octaves of 7 steps) to move notes so their average
+    sits as close as possible to the middle line of the staff."""
+    if not steps:
         return 0
-    # Moving by this many steps would keep the exact same pitches:
-    # treble -> bass is 2 - (-10) = 12 steps (the same sound sits higher on a bass staff).
-    same_pitch = CLEF_BOTTOM_LINE[old_clef] - CLEF_BOTTOM_LINE[new_clef]
-    if steps:
-        average = sum(steps) / len(steps)
-    else:
-        average = STAFF_MIDDLE_STEP  # no notes: any octave will do
-    # An octave is 7 letters (steps). Take away whole octaves until the
-    # notes' average is as close as possible to the middle line.
-    octaves = round((average + same_pitch - STAFF_MIDDLE_STEP) / 7)
-    return same_pitch - 7 * octaves
+    average = sum(steps) / len(steps)
+    return -7 * round((average - STAFF_MIDDLE_STEP) / 7)
+
+
+def spell(midi, clef, letter):
+    """Write a MIDI pitch as a staff step + alter, using the given letter
+    (C=0 ... B=6) if it can be done with at most one ♯ or ♭.
+
+    Returns (step, alter). If that letter would need a double sharp or
+    flat, the nearest letter that works is used instead.
+    """
+    best = None
+    for step in range(-60, 61):  # every step from far below to far above the staff
+        alter = midi - step_to_midi(step, clef)
+        if abs(alter) > 1:
+            continue  # too far: this step can't spell the pitch
+        score = (letter_of(step, clef) != letter, abs(alter))  # prefer the letter, then fewer signs
+        if best is None or score < best[0]:  # tuples compare item by item
+            best = (score, step, alter)
+    return best[1], best[2]
+
+
+# How many letters a written note moves when it moves by this many half steps
+# (0-11), e.g. 2 half steps (a whole step) is 1 letter: C -> D.
+LETTERS_FOR_SEMITONES = [0, 1, 1, 2, 2, 3, 3, 4, 5, 5, 6, 6]
 
 
 def step_to_midi(step, clef="treble"):
@@ -142,26 +152,72 @@ class Instrument:
     name: str     # shown on the tab
     program: int  # General MIDI program number, 0-127 (0 = Acoustic Grand Piano)
     clef: str     # "treble" or "bass": which clef its music is written in
+    # Transposing instruments sound at a different pitch than written:
+    # sounding = written + transpose (in half steps). A guitar sounds an
+    # octave lower than written (-12); a B-flat trumpet a whole step lower (-2).
+    transpose: int = 0
 
 
-# The instruments the "+" menu offers. All of them sound at the written
-# pitch; transposing instruments (trumpet, clarinet...) are left out for now.
+# The instruments the "+" menu offers, in groups (the menu shows the headings).
 PIANO = Instrument("Piano", 0, "treble")
-INSTRUMENTS = [
-    PIANO,
-    Instrument("Organ", 19, "treble"),
-    Instrument("Harp", 46, "treble"),
-    Instrument("Violin", 40, "treble"),
-    Instrument("Flute", 73, "treble"),
-    Instrument("Oboe", 68, "treble"),
-    Instrument("Marimba", 12, "treble"),
-    Instrument("Choir", 52, "treble"),
-    Instrument("Piano (bass)", 0, "bass"),
-    Instrument("Cello", 42, "bass"),
-    Instrument("Bassoon", 70, "bass"),
-    Instrument("Trombone", 57, "bass"),
-    Instrument("Tuba", 58, "bass"),
+INSTRUMENT_GROUPS = [
+    ("Treble clef", [
+        PIANO,
+        Instrument("Organ", 19, "treble"),
+        Instrument("Harp", 46, "treble"),
+        Instrument("Violin", 40, "treble"),
+        Instrument("Flute", 73, "treble"),
+        Instrument("Oboe", 68, "treble"),
+        Instrument("Marimba", 12, "treble"),
+        Instrument("Choir", 52, "treble"),
+    ]),
+    ("Transposing (written ≠ sounding)", [
+        Instrument("Acoustic Guitar", 25, "treble", -12),
+        Instrument("Electric Guitar", 27, "treble", -12),
+        Instrument("Distortion Guitar", 30, "treble", -12),
+        Instrument("Trumpet in B♭", 56, "treble", -2),
+        Instrument("Horn in F", 60, "treble", -7),
+        Instrument("Clarinet in B♭", 71, "treble", -2),
+        Instrument("Alto Sax", 65, "treble", -9),
+        Instrument("Tenor Sax", 66, "treble", -14),
+        Instrument("Bass Guitar", 33, "bass", -12),
+        Instrument("Double Bass", 43, "bass", -12),
+    ]),
+    ("Bass clef", [
+        Instrument("Piano (bass)", 0, "bass"),
+        Instrument("Cello", 42, "bass"),
+        Instrument("Bassoon", 70, "bass"),
+        Instrument("Trombone", 57, "bass"),
+        Instrument("Tuba", 58, "bass"),
+    ]),
 ]
+# All instruments in one list: a "nested" comprehension, with two for's.
+INSTRUMENTS = [instrument for _, group in INSTRUMENT_GROUPS for instrument in group]
+
+
+def rewrite_for_instrument(notes, old, new):
+    """The notes' new (step, alter) when switching from instrument `old` to `new`.
+
+    The sound is kept: each note is respelled so the new instrument plays the
+    same note names (in sound), then the whole part moves by octaves to sit
+    well on the new staff. Rests come back as None.
+    """
+    if old.clef == new.clef and old.transpose == new.transpose:
+        return [None if n.is_rest else (n.step, n.alter) for n in notes]
+    # How much higher the new instrument's written notes are (0-11 half steps,
+    # ignoring octaves), and so how many letters they move.
+    letters_up = LETTERS_FOR_SEMITONES[(old.transpose - new.transpose) % 12]
+    spelled = []
+    for note in notes:
+        if note.is_rest:
+            spelled.append(None)
+            continue
+        sounding = step_to_midi(note.step, old.clef) + note.alter + old.transpose
+        written = sounding - new.transpose
+        letter = (letter_of(note.step, old.clef) + letters_up) % 7
+        spelled.append(spell(written, new.clef, letter))
+    shift = fit_octave_shift([step for step, _ in filter(None, spelled)])  # filter(None, ...) skips rests
+    return [None if s is None else (s[0] + shift, s[1]) for s in spelled]
 
 
 def find_instrument(name):
@@ -221,6 +277,28 @@ class Part:
     def clef(self):
         """The clef this part is written in; it comes from the instrument."""
         return self.instrument.clef
+
+    def sounding_pitch(self, note):
+        """The MIDI pitch this note actually sounds at (None for a rest).
+
+        For transposing instruments this differs from the written pitch.
+        """
+        if note.is_rest:
+            return None
+        return note.midi_pitch(self.clef) + self.instrument.transpose
+
+    def written_key(self, concert_key):
+        """The key signature this part shows, for a piece in `concert_key`.
+
+        A B-flat trumpet's part is written a whole step higher, so a piece
+        in C major shows D major (2 sharps) on the trumpet's staff.
+        """
+        # Moving up by 1 half step adds 7 sharps (or removes 5 flats) to a key,
+        # so moving the written notes up by -transpose half steps adds this many:
+        key = concert_key + (-self.instrument.transpose * 7) % 12
+        while key > 7:   # e.g. "8 sharps" is better written as 4 flats
+            key -= 12
+        return key
 
     def add_note(self, note):
         """Add a note (or rest) to the end of the part."""
@@ -370,7 +448,7 @@ class Score:
         for part_index, part in enumerate(self.parts):
             beat = 0.0
             for note_index, note in enumerate(part.notes):
-                pitch = note.midi_pitch(part.clef)
+                pitch = part.sounding_pitch(note)  # what you hear, not what's written
                 events.append(Event(beat, True, part_index, note_index, pitch))
                 beat += note.duration
                 events.append(Event(beat, False, part_index, note_index, pitch))

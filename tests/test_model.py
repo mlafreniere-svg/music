@@ -9,8 +9,8 @@ import pytest
 
 from model import (
     EIGHTH, FLAT, HALF, INSTRUMENTS, KEY_NAMES, NATURAL, PIANO, QUARTER, SHARP, WHOLE,
-    Note, Part, Score, clef_change_shift, find_instrument, key_alter, key_name, letter_of,
-    split_duration, step_to_midi,
+    Note, Part, Score, find_instrument, key_alter, key_name, letter_of,
+    rewrite_for_instrument, split_duration, step_to_midi,
 )
 
 
@@ -234,34 +234,80 @@ def test_overflowing_note_still_resets_at_the_next_measure():
     assert signs(notes) == [SHARP, None, None, None, SHARP]
 
 
-# --- Changing clef -------------------------------------------------------
+# --- Changing instruments and transposing --------------------------------
 
-def test_same_clef_means_no_shift():
-    assert clef_change_shift([0, 4, 8], "treble", "treble") == 0
-
-
-def test_clef_change_keeps_letter_names():
-    steps = [0, 2, 4, 6, 8]  # E G B D F in treble
-    shift = clef_change_shift(steps, "treble", "bass")
-    for step in steps:
-        old = step_to_midi(step, "treble")
-        new = step_to_midi(step + shift, "bass")
-        assert (old - new) % 12 == 0  # whole octaves apart: same letter name
+VIOLIN = find_instrument("Violin")
+CELLO = find_instrument("Cello")
+FLUTE = find_instrument("Flute")
+TRUMPET = find_instrument("Trumpet in B♭")
+GUITAR = find_instrument("Electric Guitar")
+BASS_GUITAR = find_instrument("Bass Guitar")
+ALTO_SAX = find_instrument("Alto Sax")
 
 
-def test_clef_change_lands_near_the_middle_of_the_staff():
-    steps = [0, 2, 4, 6, 8]  # centered on the middle line in treble
-    shift = clef_change_shift(steps, "treble", "bass")
-    new_average = sum(s + shift for s in steps) / len(steps)
-    assert abs(new_average - 4) <= 3.5  # within half an octave of the middle line
+def sounds(notes, instrument):
+    """The pitch classes (0-11, ignoring octave) the notes sound at."""
+    part = Part(notes, instrument)
+    return [None if n.is_rest else part.sounding_pitch(n) % 12 for n in notes]
 
 
-def test_clef_change_there_and_back_returns_home():
-    steps = [-2, 3, 10]
-    there = clef_change_shift(steps, "treble", "bass")
-    moved = [s + there for s in steps]
-    back = clef_change_shift(moved, "bass", "treble")
-    assert [s + back for s in moved] == steps
+def switched(notes, old, new):
+    """The notes after switching instruments, as new Note objects."""
+    spelling = rewrite_for_instrument(notes, old, new)
+    return [Note(None) if s is None else Note(s[0], alter=s[1]) for s in spelling]
+
+
+def test_same_kind_of_instrument_changes_nothing():
+    notes = [Note(0), Note(4, alter=SHARP)]
+    assert switched(notes, VIOLIN, FLUTE) == notes
+
+
+def test_clef_change_keeps_the_sound_and_fits_the_staff():
+    notes = [Note(s) for s in (0, 2, 4, 6, 8)]  # E G B D F, centered in treble
+    new = switched(notes, VIOLIN, CELLO)
+    assert sounds(new, CELLO) == sounds(notes, VIOLIN)        # same note names
+    average = sum(n.step for n in new) / len(new)
+    assert abs(average - 4) <= 3.5                            # near the middle line
+
+
+def test_trumpet_is_written_a_whole_step_up():
+    concert_c = [Note(-2)]                    # middle C on violin (treble step -2)
+    trumpet = switched(concert_c, VIOLIN, TRUMPET)
+    assert letter_of(trumpet[0].step, "treble") == 1         # written as a D...
+    assert sounds(trumpet, TRUMPET) == sounds(concert_c, VIOLIN)  # ...that sounds a C
+
+
+def test_respelling_uses_sharps_and_flats_when_needed():
+    concert_e = [Note(0)]                     # E4 on violin
+    sax = switched(concert_e, VIOLIN, ALTO_SAX)  # alto sax is written a 6th up: C#
+    assert (letter_of(sax[0].step, "treble"), sax[0].alter) == (0, SHARP)
+    assert sounds(sax, ALTO_SAX) == sounds(concert_e, VIOLIN)
+
+
+def test_guitar_sounds_an_octave_below_what_is_written():
+    part = Part([Note(-2)], GUITAR)           # written middle C
+    assert part.sounding_pitch(part.notes[0]) == 48  # sounds C3
+
+
+def test_switching_there_and_back_returns_home():
+    notes = [Note(-2), Note(3, alter=FLAT), Note(None), Note(10)]
+    for other in (CELLO, TRUMPET, ALTO_SAX, BASS_GUITAR):
+        there = switched(notes, VIOLIN, other)
+        back = switched(there, other, VIOLIN)
+        assert sounds(back, VIOLIN) == sounds(notes, VIOLIN)
+
+
+def test_written_key_for_transposing_instruments():
+    assert Part(instrument=TRUMPET).written_key(0) == 2     # concert C -> D major
+    assert Part(instrument=TRUMPET).written_key(-2) == 0    # concert B-flat -> C major
+    assert Part(instrument=ALTO_SAX).written_key(0) == 3    # concert C -> A major
+    assert Part(instrument=GUITAR).written_key(1) == 1      # octave: same key
+    assert Part(instrument=TRUMPET).written_key(6) == -4    # F# + 2 -> A-flat, not 8 sharps
+
+
+def test_instrument_transpositions_are_sensible():
+    for instrument in INSTRUMENTS:
+        assert -24 <= instrument.transpose <= 0  # all of ours sound at or below what's written
 
 
 # --- Instruments and scores ----------------------------------------------

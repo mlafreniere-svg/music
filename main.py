@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
 )
 
 from model import (  # our own model.py
-    EIGHTH, FLAT, HALF, INSTRUMENTS, KEY_NAMES, NATURAL, PIANO, QUARTER, SHARP, WHOLE,
+    EIGHTH, FLAT, HALF, INSTRUMENT_GROUPS, KEY_NAMES, NATURAL, PIANO, QUARTER, SHARP, WHOLE,
     Note, Score, key_alter, key_name, letter_of,
 )
 from edits import (
@@ -287,7 +287,7 @@ class StaffWidget(QWidget):
     def preview_note(self, note):
         """Ask to hear this note, if Preview is switched on."""
         if self.settings.preview and not note.is_rest:
-            self.preview.emit(self.part.instrument.program, note.midi_pitch(self.part.clef))
+            self.preview.emit(self.part.instrument.program, self.part.sounding_pitch(note))
 
     def mousePressEvent(self, event):
         # Qt calls this automatically whenever the mouse is clicked on us.
@@ -813,7 +813,7 @@ class MainWindow(QMainWindow):
         The tab goes at position `index`, or at the end if index is None.
         """
         staff = StaffWidget(part, self.settings)
-        staff.set_key(self.score.key)
+        staff.set_key(part.written_key(self.score.key))  # transposing parts show their own key
         staff.preview.connect(self.player.preview)  # the signal's (program, pitch) go straight through
         # Turn the staff's requests into undoable commands. "part=part" stores
         # this tab's part inside each lambda (see make_mute_solo).
@@ -918,18 +918,22 @@ class MainWindow(QMainWindow):
         self.undo_stack.push(AddPart(self, self.score, action.data()))
 
     def fill_instrument_menu(self, menu, current=None):
-        """Add one entry per instrument to a menu, treble first, then bass.
+        """Add one entry per instrument to a menu, under group headings.
 
         If `current` is given, that instrument's entry gets a check mark.
         """
-        for instrument in INSTRUMENTS:
-            if instrument.name == "Piano (bass)":
-                menu.addSeparator()  # a divider between treble and bass
-            action = menu.addAction(f"{instrument.name}  ({instrument.clef})")
-            action.setData(instrument)  # remember which instrument this entry means
-            if current is not None:
-                action.setCheckable(True)
-                action.setChecked(instrument == current)
+        for heading, instruments in INSTRUMENT_GROUPS:
+            menu.addSection(heading)  # a labeled divider
+            for instrument in instruments:
+                self.add_instrument_entry(menu, instrument, current)
+
+    def add_instrument_entry(self, menu, instrument, current):
+        """One instrument's entry in an instrument menu."""
+        action = menu.addAction(f"{instrument.name}  ({instrument.clef})")
+        action.setData(instrument)  # remember which instrument this entry means
+        if current is not None:
+            action.setCheckable(True)
+            action.setChecked(instrument == current)
 
     def on_tab_right_click(self, pos):
         """Slot: a tab was right-clicked. Offer to change its instrument."""
@@ -972,7 +976,7 @@ class MainWindow(QMainWindow):
                 self.tabs.setTabText(tab_index, "")  # so its own old name doesn't count as taken
                 self.tabs.setTabText(tab_index, self.unused_tab_label(part.instrument.name))
                 self.tabs.setCurrentIndex(tab_index)
-                staff.refresh()
+                staff.set_key(part.written_key(self.score.key))  # a transposing instrument shows another key
                 return
 
     def insert_part(self, index, part):
@@ -995,7 +999,7 @@ class MainWindow(QMainWindow):
         self.score.key = key  # first, so on_key_chosen sees no new edit
         self.key_box.setCurrentIndex(self.key_box.findData(key))
         for staff in self.all_staffs():
-            staff.set_key(key)
+            staff.set_key(staff.part.written_key(key))  # transposing parts show their own key
 
     def set_tempo(self, bpm):
         """Change the tempo and move the slider to match."""

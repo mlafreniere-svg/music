@@ -20,7 +20,7 @@ can show its change on screen:
 
 from PySide6.QtGui import QUndoCommand
 
-from model import Part, clef_change_shift
+from model import Part, rewrite_for_instrument
 
 
 class AddNote(QUndoCommand):
@@ -104,10 +104,10 @@ class ChangeAlter(QUndoCommand):
 
 
 class ChangeInstrument(QUndoCommand):
-    """Switch a part to another instrument.
+    """Switch a part to another instrument, keeping how it sounds.
 
-    If the clef changes, the notes keep their letter names and move by
-    whole octaves to fit the new staff (see clef_change_shift).
+    Notes are respelled for the new instrument (its clef and transposition)
+    and moved by octaves to fit its staff (see rewrite_for_instrument).
     """
 
     def __init__(self, view, part, instrument):
@@ -116,22 +116,24 @@ class ChangeInstrument(QUndoCommand):
         self.part = part
         self.old_instrument = part.instrument
         self.new_instrument = instrument
-        pitched = [note.step for note in part.notes if not note.is_rest]
-        self.shift = clef_change_shift(pitched, part.clef, instrument.clef)
+        # Remember every note's (step, alter) before and after, so undo is exact.
+        self.old_spelling = [None if n.is_rest else (n.step, n.alter) for n in part.notes]
+        self.new_spelling = rewrite_for_instrument(part.notes, part.instrument, instrument)
 
-    def apply(self, instrument, shift):
-        """Set the instrument and move every pitched note by `shift` steps."""
+    def apply(self, instrument, spelling):
+        """Set the instrument and give every pitched note its (step, alter)."""
         self.part.instrument = instrument
-        for note in self.part.notes:
-            if not note.is_rest:
-                note.step += shift  # += adds to the value already there
+        # zip pairs up two lists item by item: (note 0, spelling 0), (note 1, ...), ...
+        for note, spelled in zip(self.part.notes, spelling):
+            if spelled is not None:
+                note.step, note.alter = spelled  # unpack the pair into two fields
         self.view.instrument_changed(self.part)
 
     def redo(self):
-        self.apply(self.new_instrument, self.shift)
+        self.apply(self.new_instrument, self.new_spelling)
 
     def undo(self):
-        self.apply(self.old_instrument, -self.shift)  # move back the same distance
+        self.apply(self.old_instrument, self.old_spelling)
 
 
 class AddPart(QUndoCommand):
