@@ -16,11 +16,12 @@ from PySide6.QtWidgets import (
 
 from model import (  # our own model.py
     DRUM_MAP, EIGHTH, FLAT, HALF, INSTRUMENT_GROUPS, KEY_NAMES, NATURAL, PIANO, QUARTER,
-    SHARP, WHOLE, Note, Score, key_alter, key_name, letter_of, nearest_drum_step,
+    SHARP, WHOLE, Note, Part, Score, key_alter, key_name, letter_of, nearest_drum_step,
+    transpose_note,
 )
 from edits import (
-    AddNote, AddPart, ChangeAlter, ChangeInstrument, ChangeKey, ChangeTempo, MoveNote,
-    RemoveNote, RemovePart,
+    AddNote, AddPart, ChangeInstrument, ChangeKey, ChangeTempo, RemoveNote, RemovePart,
+    SetNotePitch,
 )
 from midi_export import export_midi
 from player import MAX_PARTS, PAUSED, PLAYING, STOPPED, Player
@@ -165,7 +166,7 @@ class StaffWidget(QWidget):
     # turns each request into an undoable command (see edits.py).
     add_requested = Signal(object)          # a Note to add at the end ("object": any Python value)
     remove_requested = Signal(int)          # the index of a note to delete
-    move_requested = Signal(int, int, int)  # (index, old step, new step) after a drag
+    move_requested = Signal(int, object, object)  # (index, old (step, alter), new (step, alter))
 
     preview = Signal(int, int, int)  # (sound bank, program, MIDI pitch): "let me hear this note"
     hint = Signal(str)          # a short message for the status bar (e.g. which drum is here)
@@ -183,15 +184,22 @@ class StaffWidget(QWidget):
         self.playing_index = None
         # The color everything is drawn in; gray when Mute/Solo silences this part.
         self.ink = INK
-        # The score's key signature (+ sharps / - flats); the window keeps it up to date.
+        # The key signature shown on this staff (+ sharps / - flats); the window keeps it up to date.
         self.key = 0
+        # How far (in half steps) the display is moved from the written notes:
+        # 0 normally; in concert pitch view, the instrument's concert_offset.
+        self.offset = 0
+        # The notes as they're *shown*. Drawing and clicking use this; edits
+        # are converted back to written pitch and applied to self.part.
+        self.shown = self.build_shown()
         # Tall enough for ledger-line notes and the playback cursor.
         self.setMinimumHeight(round(step_to_y(LOWEST_STEP - 4)))
         self.update_width()
 
         # Dragging: which note is being dragged (None = no drag) and where it started.
         self.drag_index = None
-        self.drag_start_step = None
+        self.drag_start = None       # the dragged note's written (step, alter) before the drag
+        self.drag_shown_alter = NATURAL  # its displayed ♯/♭, kept while dragging
         # The note the mouse is over right now (None = none), for the + / - keys.
         self.hover_index = None
         # Normally Qt only reports mouse movement while a button is held down.
@@ -205,18 +213,45 @@ class StaffWidget(QWidget):
         The staff sits inside a scroll area. When the staff is wider than
         the window, the scroll area shows a scroll bar.
         """
-        columns = len(self.part.pieces())
+        columns = len(self.shown.pieces())
         self.setMinimumWidth(round(self.column_x(columns) + EMPTY_SPACE_AT_END))
 
     def refresh(self):
-        """After the part's notes change: resize and redraw."""
+        """After the part's notes change: rebuild the display, resize, redraw."""
+        self.shown = self.build_shown()
         self.update_width()
         self.update()  # ask Qt to repaint soon; it will call paintEvent
 
-    def set_key(self, key):
-        """Use a new key signature: it changes the signs and where notes start."""
+    def set_display(self, offset, key):
+        """Show the notes moved by `offset` half steps, with key signature `key`.
+
+        Written pitch: offset 0 and the part's written key. Concert pitch:
+        the instrument's concert offset and the piece's concert key.
+        """
+        self.offset = offset
         self.key = key
         self.refresh()
+
+    def build_shown(self):
+        """A display-only copy of the part, moved by self.offset."""
+        if self.offset == 0:
+            return self.part  # nothing to change: show the real part
+        notes = []
+        for note in self.part.notes:
+            if note.is_rest:
+                notes.append(note)
+            else:
+                step, alter = self.to_shown(note.step, note.alter)
+                notes.append(Note(step, note.duration, alter))
+        return Part(notes, self.part.instrument)
+
+    def to_shown(self, step, alter):
+        """Written pitch -> how it's displayed."""
+        return transpose_note(step, alter, self.part.clef, self.offset)
+
+    def to_written(self, step, alter):
+        """Displayed pitch -> written pitch (what's stored)."""
+        return transpose_note(step, alter, self.part.clef, -self.offset)
 
     def set_dimmed(self, dimmed):
         """Draw the staff in gray (dimmed=True) or black."""
@@ -244,8 +279,8 @@ class StaffWidget(QWidget):
 
     def note_columns(self):
         """For each note, the list of columns its pieces are drawn in."""
-        columns = [[] for _ in self.part.notes]  # one empty list per note
-        for column, piece in enumerate(self.part.pieces()):
+        columns = [[] for _ in self.shown.notes]  # one empty list per note
+        for column, piece in enumerate(self.shown.pieces()):
             columns[piece.note_index].append(column)
         return columns
 
@@ -254,12 +289,12 @@ class StaffWidget(QWidget):
         columns = self.note_columns()
         if 0 <= index < len(columns):
             return self.column_x(columns[index][0])
-        return self.column_x(len(self.part.pieces()))  # where the next note will go
+        return self.column_x(len(self.shown.pieces()))  # where the next note will go
 
     def column_at(self, x):
         """Which column is at this x position, or None if none is."""
         column = round((x - self.first_note_x()) / NOTE_SPACING)
-        return column if 0 <= column < len(self.part.pieces()) else None
+        return column if 0 <= column < len(self.shown.pieces()) else None
 
     def note_index_at(self, x):
         """Which note is at this x position? (Any of its pieces counts.)
@@ -267,7 +302,7 @@ class StaffWidget(QWidget):
         Returns the note's index, or None if there's no note there.
         """
         column = self.column_at(x)
-        return None if column is None else self.part.pieces()[column].note_index
+        return None if column is None else self.shown.pieces()[column].note_index
 
     def note_head_at(self, pos):
         """The index of the note whose head is under this point, or None.
@@ -278,8 +313,8 @@ class StaffWidget(QWidget):
         column = self.column_at(pos.x())
         if column is None:
             return None
-        index = self.part.pieces()[column].note_index
-        note = self.part.notes[index]
+        index = self.shown.pieces()[column].note_index
+        note = self.shown.notes[index]  # where it's *drawn*
         if note.is_rest:
             return None
         # abs() is the distance ignoring direction: abs(-3) is 3.
@@ -312,7 +347,10 @@ class StaffWidget(QWidget):
         index = self.note_head_at(event.position())
         if index is not None:
             self.drag_index = index
-            self.drag_start_step = self.part.notes[index].step
+            written = self.part.notes[index]
+            self.drag_start = (written.step, written.alter)  # for undo
+            # Dragging keeps the note's displayed ♯/♭ and changes its line or space.
+            self.drag_shown_alter = self.shown.notes[index].alter
             self.setCursor(Qt.ClosedHandCursor)
             self.preview_note(self.part.notes[index])
             return
@@ -328,6 +366,8 @@ class StaffWidget(QWidget):
             alter = key_alter(letter_of(step, self.part.clef), self.key)
         else:
             alter = self.settings.alter
+        if step is not None:
+            step, alter = self.to_written(step, alter)  # what you clicked is what's shown
         note = Note(step, self.settings.duration, alter)
         self.add_requested.emit(note)
         self.preview_note(note)
@@ -345,11 +385,11 @@ class StaffWidget(QWidget):
             return
         # While dragging, the note follows the mouse right away, so you can see
         # and hear where it's going. The undoable edit is made on release.
-        note = self.part.notes[self.drag_index]
         new_step = self.step_at(event.position().y())
-        if new_step != note.step:  # only when it crosses into a new line or space
-            note.step = new_step
-            self.update()
+        if new_step != self.shown.notes[self.drag_index].step:  # crossed into a new line or space
+            note = self.part.notes[self.drag_index]
+            note.step, note.alter = self.to_written(new_step, self.drag_shown_alter)
+            self.refresh()
             self.preview_note(note)
 
     def leaveEvent(self, event):
@@ -371,11 +411,12 @@ class StaffWidget(QWidget):
         if self.drag_index is None or event.button() != Qt.LeftButton:
             return
         index = self.drag_index
-        new_step = self.part.notes[index].step
+        note = self.part.notes[index]
+        new = (note.step, note.alter)
         self.drag_index = None
         self.setCursor(Qt.OpenHandCursor)  # the pointer is still over the note
-        if new_step != self.drag_start_step:  # only a real move becomes an undo step
-            self.move_requested.emit(index, self.drag_start_step, new_step)
+        if new != self.drag_start:  # only a real move becomes an undo step
+            self.move_requested.emit(index, self.drag_start, new)
 
     def paintEvent(self, event):
         # Qt calls paintEvent automatically whenever the widget needs to be
@@ -385,7 +426,7 @@ class StaffWidget(QWidget):
         painter.setRenderHint(QPainter.Antialiasing)  # smooth edges
         painter.fillRect(self.rect(), Qt.white)        # paper background
 
-        pieces = self.part.pieces()
+        pieces = self.shown.pieces()
 
         # The cursor goes first, so the staff and notes are drawn on top of it.
         # It covers every column of the playing note (all its tied pieces).
@@ -411,10 +452,10 @@ class StaffWidget(QWidget):
         # The model decides how notes are split and tied (pieces) and which
         # ♯ ♭ ♮ signs are needed (accidental_signs).
         # enumerate gives each item along with its position: (0, first), (1, second), ...
-        signs = self.part.accidental_signs(self.key)
+        signs = self.shown.accidental_signs(self.key)
         bar_lines = []
         for column, piece in enumerate(pieces):
-            note = self.part.notes[piece.note_index]
+            note = self.shown.notes[piece.note_index]
             x = self.column_x(column)
             self.draw_note(painter, x, note, piece.duration)
             if piece.first and signs[piece.note_index] is not None:
@@ -670,6 +711,8 @@ class MainWindow(QMainWindow):
         self.file_path = None           # where the score was last saved; None = never saved
         self.score = Score()            # all the music: one Part per tab
         self.settings = EditSettings()  # shared by every tab's staff
+        # View setting: show transposing parts at sounding (concert) pitch.
+        self.concert_pitch = False
 
         # Every edit goes onto this stack as a command (see edits.py), so it
         # can be undone. The stack also knows whether we're back at the last
@@ -812,6 +855,15 @@ class MainWindow(QMainWindow):
         self.key_box.currentIndexChanged.connect(self.on_key_chosen)
         toolbar.addWidget(self.key_box)
 
+        # Concert pitch: a view switch, shared by this toolbar and the View menu.
+        toolbar.addSeparator()
+        self.concert_action = QAction("Concert Pitch", self)
+        self.concert_action.setToolTip(
+            "Show transposing instruments at the pitch they sound (not what their players read)")
+        self.concert_action.setCheckable(True)
+        self.concert_action.toggled.connect(self.on_concert_pitch_toggled)
+        toolbar.addAction(self.concert_action)
+
         # Keep the buttons and the cursor in step with the player.
         self.player.state_changed.connect(self.update_transport_buttons)
         self.player.note_started.connect(self.on_note_started)
@@ -819,6 +871,8 @@ class MainWindow(QMainWindow):
 
         self.build_file_menu()
         self.build_edit_menu()
+        view_menu = self.menuBar().addMenu("&View")
+        view_menu.addAction(self.concert_action)  # the same action as the toolbar button
         self.update_title()
 
     # --- Tabs ---------------------------------------------------------------
@@ -847,7 +901,7 @@ class MainWindow(QMainWindow):
         The tab goes at position `index`, or at the end if index is None.
         """
         staff = StaffWidget(part, self.settings)
-        staff.set_key(part.written_key(self.score.key))  # transposing parts show their own key
+        self.update_staff_display(staff)  # written or concert pitch, and the right key
         staff.preview.connect(self.player.preview)  # the signal's (bank, program, pitch) go straight through
         staff.hint.connect(lambda text: self.statusBar().showMessage(text, 2000))
         # Turn the staff's requests into undoable commands. "part=part" stores
@@ -857,7 +911,8 @@ class MainWindow(QMainWindow):
         staff.remove_requested.connect(
             lambda i, part=part: self.undo_stack.push(RemoveNote(self, part, i)))
         staff.move_requested.connect(
-            lambda i, old, new, part=part: self.undo_stack.push(MoveNote(self, part, i, old, new)))
+            lambda i, old, new, part=part: self.undo_stack.push(
+                SetNotePitch(self, part, i, old, new, "Move note")))
 
         # Put the staff in a scroll area, so long pieces can scroll sideways.
         area = QScrollArea()
@@ -1011,7 +1066,7 @@ class MainWindow(QMainWindow):
                 self.tabs.setTabText(tab_index, "")  # so its own old name doesn't count as taken
                 self.tabs.setTabText(tab_index, self.unused_tab_label(part.instrument.name))
                 self.tabs.setCurrentIndex(tab_index)
-                staff.set_key(part.written_key(self.score.key))  # a transposing instrument shows another key
+                self.update_staff_display(staff)  # a transposing instrument shows another key
                 return
 
     def insert_part(self, index, part):
@@ -1034,7 +1089,7 @@ class MainWindow(QMainWindow):
         self.score.key = key  # first, so on_key_chosen sees no new edit
         self.key_box.setCurrentIndex(self.key_box.findData(key))
         for staff in self.all_staffs():
-            staff.set_key(staff.part.written_key(key))  # transposing parts show their own key
+            self.update_staff_display(staff)  # transposing parts show their own key
 
     def set_tempo(self, bpm):
         """Change the tempo and move the slider to match."""
@@ -1173,13 +1228,33 @@ class MainWindow(QMainWindow):
         if index is None:
             self.statusBar().showMessage("Point at a note, then press + or -.", 3000)
             return
-        note = staff.part.notes[index]
-        new_alter = note.alter + direction
+        # Work with the note as it's *shown* (concert pitch view may differ),
+        # then convert the result back to written pitch for storing.
+        shown = staff.shown.notes[index]
+        new_alter = shown.alter + direction
         if not FLAT <= new_alter <= SHARP:  # Python allows chained comparisons like this
             self.statusBar().showMessage("Double sharps and flats aren't supported.", 3000)
             return
-        self.undo_stack.push(ChangeAlter(self, staff.part, index, new_alter))
+        note = staff.part.notes[index]
+        old = (note.step, note.alter)
+        new = staff.to_written(shown.step, new_alter)
+        text = "Raise note" if direction > 0 else "Lower note"
+        self.undo_stack.push(SetNotePitch(self, staff.part, index, old, new, text))
         staff.preview_note(note)  # hear the new pitch
+
+    def update_staff_display(self, staff):
+        """Show a staff at written pitch, or at concert pitch if that's switched on."""
+        part = staff.part
+        offset = part.instrument.concert_offset if self.concert_pitch else 0
+        # A part shown at concert pitch uses the piece's real key; otherwise its own.
+        key = self.score.key if offset else part.written_key(self.score.key)
+        staff.set_display(offset, key)
+
+    def on_concert_pitch_toggled(self, checked):
+        """Slot: the Concert Pitch switch was flipped (a view setting: not saved, not undoable)."""
+        self.concert_pitch = checked
+        for staff in self.all_staffs():
+            self.update_staff_display(staff)
 
     def update_title(self):
         """Show the file name, plus * if there are unsaved changes."""

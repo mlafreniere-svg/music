@@ -62,45 +62,32 @@ class RemoveNote(QUndoCommand):
         self.view.part_changed(self.part, self.index)
 
 
-class MoveNote(QUndoCommand):
-    """Change a note's pitch (by dragging it)."""
+class SetNotePitch(QUndoCommand):
+    """Change a note's written pitch: its staff step and its ♯/♭.
 
-    def __init__(self, view, part, index, old_step, new_step):
-        super().__init__("Move note")
+    Used for dragging ("Move note") and for + / - ("Raise note", "Lower note").
+    Both can change the step *and* the accidental (in concert pitch view a
+    displayed change becomes a respelled written one), so both are stored.
+    """
+
+    def __init__(self, view, part, index, old, new, text):
+        super().__init__(text)
         self.view = view
         self.part = part
         self.index = index
-        self.old_step = old_step
-        self.new_step = new_step
+        self.old = old  # (step, alter) before
+        self.new = new  # (step, alter) after
+
+    def apply(self, pitch):
+        note = self.part.notes[self.index]
+        note.step, note.alter = pitch
+        self.view.part_changed(self.part, self.index)
 
     def redo(self):
-        self.part.notes[self.index].step = self.new_step
-        self.view.part_changed(self.part, self.index)
+        self.apply(self.new)
 
     def undo(self):
-        self.part.notes[self.index].step = self.old_step
-        self.view.part_changed(self.part, self.index)
-
-
-class ChangeAlter(QUndoCommand):
-    """Raise or lower a note by a half step (♭ → ♮ → ♯ or back)."""
-
-    def __init__(self, view, part, index, new_alter):
-        old_alter = part.notes[index].alter
-        super().__init__("Raise note" if new_alter > old_alter else "Lower note")
-        self.view = view
-        self.part = part
-        self.index = index
-        self.old_alter = old_alter
-        self.new_alter = new_alter
-
-    def redo(self):
-        self.part.notes[self.index].alter = self.new_alter
-        self.view.part_changed(self.part, self.index)
-
-    def undo(self):
-        self.part.notes[self.index].alter = self.old_alter
-        self.view.part_changed(self.part, self.index)
+        self.apply(self.old)
 
 
 class ChangeInstrument(QUndoCommand):

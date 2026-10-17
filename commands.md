@@ -135,6 +135,7 @@ Keyboard shortcuts inside the app:
 | `K` | New notes follow the key signature (e.g. F becomes F♯ in G major). The default. |
 | `N` `S` `F` | Natural / sharp / flat for the next notes you place. |
 | Key drop-down | Choose the key signature (Playback toolbar). Notes keep their pitches; signs update. |
+| Concert Pitch | Show transposing instruments at the pitch they sound (Playback toolbar, or View menu / `Alt+V`). |
 | Point at a note + `+` (or `=`) | Raise that note a half step (♭ → ♮ → ♯). |
 | Point at a note + `-` | Lower that note a half step (♯ → ♮ → ♭). |
 | `Backspace` | Delete the last note. |

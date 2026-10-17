@@ -10,7 +10,7 @@ import pytest
 from model import (
     EIGHTH, FLAT, HALF, INSTRUMENTS, KEY_NAMES, NATURAL, PIANO, QUARTER, SHARP, WHOLE,
     Note, Part, Score, find_instrument, key_alter, key_name, letter_of, nearest_drum_step,
-    rewrite_for_instrument, split_duration, step_to_midi,
+    rewrite_for_instrument, split_duration, step_to_midi, transpose_note,
 )
 
 
@@ -338,6 +338,38 @@ def test_drum_timeline_uses_drum_sounds():
     score = Score()
     score.add_part(DRUMS).notes = [Note(1), Note(5)]
     assert [e.pitch for e in score.timeline() if e.starts] == [36, 38]
+
+
+def test_concert_offsets():
+    assert TRUMPET.concert_offset == -2
+    assert ALTO_SAX.concert_offset == -9
+    assert find_instrument("Tenor Sax").concert_offset == -2  # a 9th, minus the octave
+    assert GUITAR.concert_offset == 0      # octave transposers look the same
+    assert BASS_GUITAR.concert_offset == 0
+    assert DRUMS.concert_offset == 0
+
+
+def test_transpose_note_spells_like_a_musician():
+    # Written D4 (treble step -1) down a whole step: C4, no accidental.
+    assert transpose_note(-1, NATURAL, "treble", -2) == (-2, NATURAL)
+    # Written C5 (step 5) down a whole step: B-flat 4 (step 4, flat), not A-sharp.
+    assert transpose_note(5, NATURAL, "treble", -2) == (4, FLAT)
+    # Alto sax written C5 sounds E-flat 4 (down a major 6th): E (step 0), flat.
+    assert transpose_note(5, NATURAL, "treble", -9) == (0, FLAT)
+
+
+def test_transpose_note_there_and_back():
+    pitch = lambda step, alter: step_to_midi(step, "treble") + alter
+    for step in range(-2, 11):
+        for alter in (FLAT, NATURAL, SHARP):
+            for semitones in (-2, -9, -7):
+                there = transpose_note(step, alter, "treble", semitones)
+                back = transpose_note(*there, "treble", -semitones)  # * unpacks the pair
+                assert pitch(*back) == pitch(step, alter)  # the sound always comes home
+                if alter == NATURAL:
+                    assert back == (step, alter)  # and naturals keep their exact spelling
+    # (A rare note like C-flat moved down a whole step would need a double
+    # flat, which isn't supported, so it's respelled: same sound, new letter.)
 
 
 def test_instrument_transpositions_are_sensible():

@@ -5,6 +5,7 @@ means the drawing code, playback code, and save/load code can all share the
 same data without getting tangled together.
 """
 
+import math
 from dataclasses import dataclass, field
 
 # Durations, measured in beats. In 4/4 time a quarter note gets one beat.
@@ -128,6 +129,21 @@ def spell(midi, clef, letter):
 LETTERS_FOR_SEMITONES = [0, 1, 1, 2, 2, 3, 3, 4, 5, 5, 6, 6]
 
 
+def transpose_note(step, alter, clef, semitones):
+    """Move a written note by some half steps, spelled the way musicians would.
+
+    Returns the new (step, alter). The letter moves by the matching interval,
+    so a C moved down 2 half steps becomes B-flat (not A-sharp).
+    """
+    if semitones == 0:
+        return step, alter
+    # Whole octaves move 7 letters each; the rest uses the table above.
+    # (Floor division keeps this right for negative moves: -2 is -1 octave + 10.)
+    letters = 7 * (semitones // 12) + LETTERS_FOR_SEMITONES[semitones % 12]
+    pitch = step_to_midi(step, clef) + alter + semitones
+    return spell(pitch, clef, (letter_of(step, clef) + letters) % 7)
+
+
 def step_to_midi(step, clef="treble"):
     """Convert a staff step (0 = bottom line) to a MIDI pitch number."""
     letters_above_c4 = step + CLEF_BOTTOM_LINE[clef]
@@ -163,6 +179,17 @@ class Instrument:
     @property
     def is_drums(self):
         return self.clef == PERCUSSION
+
+    @property
+    def concert_offset(self):
+        """How far (in half steps) "concert pitch" view moves this part's notes.
+
+        It's the transposition without whole octaves: a trumpet (-2) shows
+        notes a whole step lower; a tenor sax (-14) also -2; guitars and
+        basses (-12) don't move, as in notation programs (an octave down
+        would bury them in ledger lines).
+        """
+        return int(math.fmod(self.transpose, 12))  # fmod keeps the sign: fmod(-14, 12) is -2
 
 
 # --- Drums ---------------------------------------------------------------
