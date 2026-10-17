@@ -1,5 +1,6 @@
 """Music staff app: the program's starting point. Run with: python main.py"""
 
+import bisect
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,11 +12,11 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QFileDialog, QHBoxLayout, QLabel, QMainWindow, QMenu, QMessageBox,
-    QScrollArea, QSlider, QTabBar, QTabWidget, QToolButton, QWidget,
+    QScrollArea, QSlider, QTabBar, QTabWidget, QToolButton, QVBoxLayout, QWidget,
 )
 
 from model import (  # our own model.py
-    DRUM_MAP, EIGHTH, FLAT, HALF, INSTRUMENT_GROUPS, KEY_NAMES, NATURAL, PIANO, QUARTER,
+    DRUM_MAP, EIGHTH, FLAT, GRAND_PIANO, HALF, INSTRUMENT_GROUPS, KEY_NAMES, NATURAL, QUARTER,
     SHARP, WHOLE, Note, Part, Score, key_alter, key_name, letter_of, nearest_drum_step,
     transpose_note,
 )
@@ -170,6 +171,7 @@ class StaffWidget(QWidget):
 
     preview = Signal(int, int, int)  # (sound bank, program, MIDI pitch): "let me hear this note"
     hint = Signal(str)          # a short message for the status bar (e.g. which drum is here)
+    activated = Signal()        # this staff was clicked (it becomes the one Backspace acts on)
     scroll_to = Signal(float)   # an x position that should be scrolled into view
 
     def __init__(self, part, settings):
@@ -189,6 +191,8 @@ class StaffWidget(QWidget):
         # How far (in half steps) the display is moved from the written notes:
         # 0 normally; in concert pitch view, the instrument's concert_offset.
         self.offset = 0
+        # On a grand staff: the other staff (they share columns). None otherwise.
+        self.partner = None
         # The notes as they're *shown*. Drawing and clicking use this; edits
         # are converted back to written pitch and applied to self.part.
         self.shown = self.build_shown()
@@ -213,7 +217,7 @@ class StaffWidget(QWidget):
         The staff sits inside a scroll area. When the staff is wider than
         the window, the scroll area shows a scroll bar.
         """
-        columns = len(self.shown.pieces())
+        columns = len(self.column_beats())
         self.setMinimumWidth(round(self.column_x(columns) + EMPTY_SPACE_AT_END))
 
     def refresh(self):
@@ -221,6 +225,11 @@ class StaffWidget(QWidget):
         self.shown = self.build_shown()
         self.update_width()
         self.update()  # ask Qt to repaint soon; it will call paintEvent
+        if self.partner is not None:
+            # On a grand staff the columns are shared, so the other staff's
+            # layout may have changed too.
+            self.partner.update_width()
+            self.partner.update()
 
     def set_display(self, offset, key):
         """Show the notes moved by `offset` half steps, with key signature `key`.
@@ -265,44 +274,83 @@ class StaffWidget(QWidget):
         if index is not None:
             self.scroll_to.emit(self.note_x(index))  # keep the cursor in view
 
-    def first_note_x(self):
-        """Where the first note goes: after the clef and the key signature,
-        leaving room for a ♯, ♭ or ♮ in front of it."""
+    def own_first_note_x(self):
+        """Where this staff's first note could go: after its clef and key
+        signature, leaving room for a ♯, ♭ or ♮ in front of it."""
         return max(FIRST_NOTE_X, self.key_signature_right() + ROOM_BEFORE_FIRST_NOTE)
 
-    # The staff is drawn in columns, one per *piece* (see Part.pieces): a note
-    # tied across a bar line takes two or more columns.
+    def first_note_x(self):
+        """Where the first note goes. On a grand staff both staves use the
+        later of their two starting points, so their notes line up."""
+        if self.partner is None:
+            return self.own_first_note_x()
+        return max(self.own_first_note_x(), self.partner.own_first_note_x())
+
+    # The staff is drawn in columns, one for each moment (beat) at which a
+    # piece starts (see Part.pieces). On a grand staff the two staves share
+    # their columns, so notes played together sit one above the other.
+    # A single staff never has two pieces starting together, so there every
+    # piece simply gets its own column.
+
+    def column_beats(self):
+        """The start beat of every column, in order."""
+        beats = {piece.beat for piece in self.shown.pieces()}  # a set: no repeats
+        if self.partner is not None:
+            beats |= {piece.beat for piece in self.partner.shown.pieces()}  # |= adds a set
+        return sorted(beats)
+
+    def piece_columns(self):
+        """The column of each of this staff's pieces, in order."""
+        column_of = {beat: column for column, beat in enumerate(self.column_beats())}
+        return [column_of[piece.beat] for piece in self.shown.pieces()]
 
     def column_x(self, column):
         """The x position of a column (0 = first)."""
         return self.first_note_x() + column * NOTE_SPACING
 
+    def column_for_beat(self, beat):
+        """The column at this beat; for a beat with no column, the next one along."""
+        # bisect_left finds where `beat` belongs in a sorted list.
+        return bisect.bisect_left(self.column_beats(), beat)
+
     def note_columns(self):
         """For each note, the list of columns its pieces are drawn in."""
         columns = [[] for _ in self.shown.notes]  # one empty list per note
-        for column, piece in enumerate(self.shown.pieces()):
+        for piece, column in zip(self.shown.pieces(), self.piece_columns()):
             columns[piece.note_index].append(column)
         return columns
 
     def note_x(self, index):
-        """The x position of a note's first piece (or just past the end)."""
+        """The x position of a note's first piece (or where the next note will go)."""
         columns = self.note_columns()
         if 0 <= index < len(columns):
             return self.column_x(columns[index][0])
-        return self.column_x(len(self.shown.pieces()))  # where the next note will go
+        end_beat = sum(note.duration for note in self.shown.notes)
+        return self.column_x(self.column_for_beat(end_beat))
 
     def column_at(self, x):
         """Which column is at this x position, or None if none is."""
         column = round((x - self.first_note_x()) / NOTE_SPACING)
-        return column if 0 <= column < len(self.shown.pieces()) else None
+        return column if 0 <= column < len(self.column_beats()) else None
+
+    def piece_at(self, x):
+        """This staff's piece in the column at x, or None (on a grand staff a
+        column may belong only to the other staff)."""
+        column = self.column_at(x)
+        if column is None:
+            return None, None
+        for piece, piece_column in zip(self.shown.pieces(), self.piece_columns()):
+            if piece_column == column:
+                return piece, column
+        return None, None
 
     def note_index_at(self, x):
         """Which note is at this x position? (Any of its pieces counts.)
 
         Returns the note's index, or None if there's no note there.
         """
-        column = self.column_at(x)
-        return None if column is None else self.shown.pieces()[column].note_index
+        piece, _ = self.piece_at(x)
+        return None if piece is None else piece.note_index
 
     def note_head_at(self, pos):
         """The index of the note whose head is under this point, or None.
@@ -310,10 +358,10 @@ class StaffWidget(QWidget):
         Any piece of a tied note counts. Rests don't count, since they
         can't be dragged to a new pitch.
         """
-        column = self.column_at(pos.x())
-        if column is None:
+        piece, column = self.piece_at(pos.x())
+        if piece is None:
             return None
-        index = self.shown.pieces()[column].note_index
+        index = piece.note_index
         note = self.shown.notes[index]  # where it's *drawn*
         if note.is_rest:
             return None
@@ -335,6 +383,7 @@ class StaffWidget(QWidget):
 
     def mousePressEvent(self, event):
         # Qt calls this automatically whenever the mouse is clicked on us.
+        self.activated.emit()
         if event.button() == Qt.RightButton:
             # Right-click deletes the note in that column, if there is one.
             index = self.note_index_at(event.position().x())
@@ -424,7 +473,10 @@ class StaffWidget(QWidget):
         # We never call it ourselves.
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)  # smooth edges
-        painter.fillRect(self.rect(), Qt.white)        # paper background
+        if self.partner is None:
+            painter.fillRect(self.rect(), Qt.white)    # paper background
+        # (On a grand staff the GrandStaffWidget behind us paints the paper
+        # and the brace; we leave our background see-through.)
 
         pieces = self.shown.pieces()
 
@@ -453,17 +505,21 @@ class StaffWidget(QWidget):
         # ♯ ♭ ♮ signs are needed (accidental_signs).
         # enumerate gives each item along with its position: (0, first), (1, second), ...
         signs = self.shown.accidental_signs(self.key)
+        piece_columns = self.piece_columns()
         bar_lines = []
-        for column, piece in enumerate(pieces):
+        for i, piece in enumerate(pieces):
             note = self.shown.notes[piece.note_index]
-            x = self.column_x(column)
+            x = self.column_x(piece_columns[i])
             self.draw_note(painter, x, note, piece.duration)
             if piece.first and signs[piece.note_index] is not None:
                 self.draw_accidental(painter, x, note.step, signs[piece.note_index])  # only once per note
             if piece.tied:
-                self.draw_tie(painter, x, self.column_x(column + 1), note.step)
+                self.draw_tie(painter, x, self.column_x(piece_columns[i + 1]), note.step)
             if piece.ends_measure:
-                bar_lines.append(x + NOTE_SPACING / 2)  # halfway to the next column
+                # Halfway between the last column of this measure and the first
+                # of the next, so bar lines line up on both staves of a grand staff.
+                next_column = self.column_for_beat(piece.beat + piece.duration)
+                bar_lines.append(self.column_x(next_column) - NOTE_SPACING / 2)
 
         painter.setPen(QPen(self.ink, 1))
         for x in bar_lines:
@@ -696,6 +752,72 @@ class StaffWidget(QWidget):
             painter.drawLine(QPointF(x - half_width, y), QPointF(x + half_width, y))
 
 
+class GrandStaffWidget(QWidget):
+    """Two staves stacked (right hand above, left hand below), joined at the
+    left by a brace and a line, as piano music is written.
+
+    The two StaffWidgets do the real work; this widget arranges them and
+    paints what belongs to both: the paper behind them and the brace.
+    """
+
+    def __init__(self, upper, lower):
+        super().__init__()
+        self.upper = upper
+        self.lower = lower
+        upper.partner = lower  # partners share their columns, so notes line up
+        lower.partner = upper
+        layout = QVBoxLayout(self)  # a layout that stacks widgets top to bottom
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(upper)
+        layout.addWidget(lower)
+
+    def staves(self):
+        return [self.upper, self.lower]
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.fillRect(self.rect(), Qt.white)  # paper (the staves are see-through)
+        # From the upper staff's top line to the lower staff's bottom line.
+        # Each staff's own y position inside this widget is added on.
+        top = self.upper.y() + step_to_y(TOP_LINE_STEP)
+        bottom = self.lower.y() + step_to_y(0)
+        painter.setPen(QPen(self.upper.ink, 1.5))
+        painter.drawLine(QPointF(MARGIN, top), QPointF(MARGIN, bottom))  # the line joining the staves
+        self.draw_brace(painter, top, bottom)
+
+    def draw_brace(self, painter, top, bottom):
+        """The curly brace, drawn as a filled shape just left of the staves.
+
+        It's two curves, mirror images above and below the middle, each
+        made of a thick and a thin edge so it tapers like a printed brace.
+        """
+        right = MARGIN - 4
+        width = LINE_SPACING * 1.3
+        middle = (top + bottom) / 2
+        path = QPainterPath(QPointF(right, top))
+        # Outer edge, top half: out to the left, then into the point at the middle.
+        path.cubicTo(QPointF(right - width, top + (middle - top) * 0.1),
+                     QPointF(right, middle - (middle - top) * 0.25),
+                     QPointF(right - width, middle))
+        # Outer edge, bottom half (the mirror image).
+        path.cubicTo(QPointF(right, middle + (bottom - middle) * 0.25),
+                     QPointF(right - width, bottom - (bottom - middle) * 0.1),
+                     QPointF(right, bottom))
+        # Back up along a slightly thinner inner edge, closing the shape.
+        inset = width * 0.25
+        path.cubicTo(QPointF(right - width + inset, bottom - (bottom - middle) * 0.1),
+                     QPointF(right + inset * 0.5, middle + (bottom - middle) * 0.25),
+                     QPointF(right - width, middle))
+        path.cubicTo(QPointF(right + inset * 0.5, middle - (middle - top) * 0.25),
+                     QPointF(right - width + inset, top + (middle - top) * 0.1),
+                     QPointF(right, top))
+        painter.setPen(QPen(self.upper.ink, 0.8))
+        painter.setBrush(self.upper.ink)
+        painter.drawPath(path)
+
+
 class MainWindow(QMainWindow):
     """The application window: toolbars on top, one tab per instrument below.
 
@@ -713,6 +835,8 @@ class MainWindow(QMainWindow):
         self.settings = EditSettings()  # shared by every tab's staff
         # View setting: show transposing parts at sounding (concert) pitch.
         self.concert_pitch = False
+        # The staff last clicked: Backspace acts on it (matters on a grand staff).
+        self.active_staff = None
 
         # Every edit goes onto this stack as a command (see edits.py), so it
         # can be undone. The stack also knows whether we're back at the last
@@ -744,7 +868,7 @@ class MainWindow(QMainWindow):
         tab_bar.setContextMenuPolicy(Qt.CustomContextMenu)
         tab_bar.customContextMenuRequested.connect(self.on_tab_right_click)
 
-        self.add_tab(PIANO)  # every score starts with a piano
+        self.add_tab(GRAND_PIANO)  # every score starts with a piano, on a grand staff
 
         toolbar = self.addToolBar("Editing")
         # A QActionGroup makes its buttons work like radio buttons:
@@ -877,35 +1001,50 @@ class MainWindow(QMainWindow):
 
     # --- Tabs ---------------------------------------------------------------
 
-    def current_staff(self):
-        """The staff in the tab that's open right now."""
-        return self.staff_at(self.tabs.currentIndex())
+    def staves_in_tab(self, index):
+        """The staff (or, on a grand staff, both staves) in tab number `index`.
 
-    def staff_at(self, index):
-        """The staff in tab number `index`, or None if there's no such tab.
-
-        Each tab holds a scroll area, and the staff is inside it;
-        QScrollArea.widget() gives back what's inside.
+        Each tab holds a scroll area; QScrollArea.widget() gives back what's
+        inside: a StaffWidget, or a GrandStaffWidget holding two.
         """
         area = self.tabs.widget(index)
-        return area.widget() if area is not None else None
+        if area is None:
+            return []
+        inside = area.widget()
+        # isinstance checks what kind of object something is.
+        return inside.staves() if isinstance(inside, GrandStaffWidget) else [inside]
+
+    def staff_at(self, index):
+        """The (upper) staff in tab number `index`, or None if there's no such tab."""
+        staves = self.staves_in_tab(index)
+        return staves[0] if staves else None
+
+    def current_staff(self):
+        """The staff being worked on: in the open tab, the one last clicked."""
+        staves = self.staves_in_tab(self.tabs.currentIndex())
+        return self.active_staff if self.active_staff in staves else staves[0]
+
+    def set_active_staff(self, staff):
+        """Slot: a staff was clicked; Backspace and similar now act on it."""
+        self.active_staff = staff
 
     def add_tab(self, instrument):
         """Add a part for this instrument to the score, with a tab to show it."""
         part = self.score.add_part(instrument)
         self.show_part(part)
 
-    def show_part(self, part, index=None):
-        """Make a tab for a part that's already in the score.
+    def make_staff(self, part):
+        """A StaffWidget for one staff, wired up to the player and the undo stack.
 
-        The tab goes at position `index`, or at the end if index is None.
+        `part` is the Part this staff shows: a tab's part, or on a grand staff
+        possibly its lower staff (part.lower). Edits go to exactly that Part.
         """
         staff = StaffWidget(part, self.settings)
-        self.update_staff_display(staff)  # written or concert pitch, and the right key
         staff.preview.connect(self.player.preview)  # the signal's (bank, program, pitch) go straight through
         staff.hint.connect(lambda text: self.statusBar().showMessage(text, 2000))
+        staff.activated.connect(lambda staff=staff: self.set_active_staff(staff))
         # Turn the staff's requests into undoable commands. "part=part" stores
-        # this tab's part inside each lambda (see make_mute_solo).
+        # this staff's part inside each lambda (see make_mute_solo).
         staff.add_requested.connect(
             lambda note, part=part: self.undo_stack.push(AddNote(self, part, note)))
         staff.remove_requested.connect(
@@ -913,13 +1052,29 @@ class MainWindow(QMainWindow):
         staff.move_requested.connect(
             lambda i, old, new, part=part: self.undo_stack.push(
                 SetNotePitch(self, part, i, old, new, "Move note")))
+        return staff
 
-        # Put the staff in a scroll area, so long pieces can scroll sideways.
+    def show_part(self, part, index=None):
+        """Make a tab for a part that's already in the score.
+
+        The tab goes at position `index`, or at the end if index is None.
+        A grand-staff part gets two staves joined by a brace.
+        """
+        staves = [self.make_staff(staff_part) for staff_part in part.staves()]
+        if len(staves) == 2:
+            inside = GrandStaffWidget(*staves)  # * spreads the list into two arguments
+        else:
+            inside = staves[0]
+        for staff in staves:
+            self.update_staff_display(staff)  # written or concert pitch, and the right key
+
+        # Put the staff(s) in a scroll area, so long pieces can scroll sideways.
         area = QScrollArea()
-        area.setWidget(staff)
+        area.setWidget(inside)
         area.setWidgetResizable(True)  # stretch the staff to fill the window when it's short
         area.setFocusPolicy(Qt.NoFocus)  # keep Space for play/pause
-        staff.scroll_to.connect(lambda x, area=area: self.scroll_into_view(area, x))
+        for staff in staves:
+            staff.scroll_to.connect(lambda x, area=area: self.scroll_into_view(area, x))
 
         label = self.unused_tab_label(part.instrument.name)
         if index is None:
@@ -975,8 +1130,9 @@ class MainWindow(QMainWindow):
 
     def refresh_audibility(self):
         """Gray out every staff that Mute/Solo has silenced."""
-        for index, staff in enumerate(self.all_staffs()):
-            staff.set_dimmed(not self.score.is_audible(index))
+        for index in range(self.tabs.count()):
+            for staff in self.staves_in_tab(index):  # both staves of a grand staff
+                staff.set_dimmed(not self.score.is_audible(index))
 
     def unused_tab_label(self, name):
         """A tab label not already in use: "Violin", else "Violin 2", "Violin 3", ..."""
@@ -989,8 +1145,16 @@ class MainWindow(QMainWindow):
         return label
 
     def all_staffs(self):
-        """Every tab's staff, in tab order."""
-        return [self.staff_at(i) for i in range(self.tabs.count())]
+        """Every staff in every tab, in order (a grand staff contributes two)."""
+        return [staff for i in range(self.tabs.count()) for staff in self.staves_in_tab(i)]
+
+    def tab_of_part(self, part):
+        """The tab number showing this Part (a tab's part or a lower staff), or None."""
+        for index in range(self.tabs.count()):
+            for staff in self.staves_in_tab(index):
+                if staff.part is part:  # "is": this exact Part object
+                    return index
+        return None
 
     def scroll_into_view(self, area, x):
         """Scroll a tab's scroll area so position x on its staff is visible."""
@@ -1007,23 +1171,29 @@ class MainWindow(QMainWindow):
             return
         self.undo_stack.push(AddPart(self, self.score, action.data()))
 
-    def fill_instrument_menu(self, menu, current=None):
+    def fill_instrument_menu(self, menu, current=None, allowed=None):
         """Add one entry per instrument to a menu, under group headings.
 
         If `current` is given, that instrument's entry gets a check mark.
+        If `allowed` is given (a function), instruments it says no to are grayed out.
         """
         for heading, instruments in INSTRUMENT_GROUPS:
             menu.addSection(heading)  # a labeled divider
             for instrument in instruments:
-                self.add_instrument_entry(menu, instrument, current)
+                action = self.add_instrument_entry(menu, instrument, current)
+                if allowed is not None:
+                    action.setEnabled(allowed(instrument))
 
     def add_instrument_entry(self, menu, instrument, current):
         """One instrument's entry in an instrument menu."""
-        action = menu.addAction(f"{instrument.name}  ({instrument.clef})")
+        clef = "grand staff" if instrument.grand else instrument.clef
+        label = instrument.name if instrument.grand else f"{instrument.name}  ({clef})"
+        action = menu.addAction(label)
         action.setData(instrument)  # remember which instrument this entry means
         if current is not None:
             action.setCheckable(True)
             action.setChecked(instrument == current)
+        return action
 
     def on_tab_right_click(self, pos):
         """Slot: a tab was right-clicked. Offer to change its instrument."""
@@ -1032,8 +1202,14 @@ class MainWindow(QMainWindow):
             return
         part = self.score.parts[index]
         menu = QMenu(self)
-        menu.addSection("Change instrument")  # a heading at the top of the menu
-        self.fill_instrument_menu(menu, current=part.instrument)
+        if part.instrument.grand:
+            # A grand staff holds two hands; one-staff instruments can't.
+            menu.addSection("Change instrument (grand staff: keyboards only)")
+        else:
+            menu.addSection("Change instrument")  # a heading at the top of the menu
+        # Grand staff <-> grand staff, one staff <-> one staff.
+        same_kind = lambda instrument: instrument.grand == part.instrument.grand
+        self.fill_instrument_menu(menu, current=part.instrument, allowed=same_kind)
         # exec() shows the menu where the mouse is and waits for a choice.
         # It returns the chosen action, or None if the menu was dismissed.
         chosen = menu.exec(self.tabs.tabBar().mapToGlobal(pos))
@@ -1050,24 +1226,30 @@ class MainWindow(QMainWindow):
     # --- What the undoable commands call (the "view" in edits.py) -------------
 
     def part_changed(self, part, index):
-        """A part's notes changed: show its tab, redraw it, and show note `index`."""
-        for tab_index, staff in enumerate(self.all_staffs()):
-            if staff.part is part:  # "is": this exact Part object
-                self.tabs.setCurrentIndex(tab_index)  # undo shows you what it undid
+        """A part's notes changed: show its tab, redraw it, and show note `index`.
+
+        `part` may be a grand staff's lower staff; its own StaffWidget is found.
+        """
+        tab_index = self.tab_of_part(part)
+        if tab_index is None:
+            return
+        self.tabs.setCurrentIndex(tab_index)  # undo shows you what it undid
+        for staff in self.staves_in_tab(tab_index):
+            if staff.part is part:
                 staff.refresh()
                 staff.scroll_to.emit(staff.note_x(max(index, 0)))
-                return
 
     def instrument_changed(self, part):
         """A part switched instruments: relabel its tab and redraw (the clef may differ)."""
         self.stop_if_playing()  # the player picked the old instrument when it started
-        for tab_index, staff in enumerate(self.all_staffs()):
-            if staff.part is part:
-                self.tabs.setTabText(tab_index, "")  # so its own old name doesn't count as taken
-                self.tabs.setTabText(tab_index, self.unused_tab_label(part.instrument.name))
-                self.tabs.setCurrentIndex(tab_index)
-                self.update_staff_display(staff)  # a transposing instrument shows another key
-                return
+        tab_index = self.tab_of_part(part)
+        if tab_index is None:
+            return
+        self.tabs.setTabText(tab_index, "")  # so its own old name doesn't count as taken
+        self.tabs.setTabText(tab_index, self.unused_tab_label(part.instrument.name))
+        self.tabs.setCurrentIndex(tab_index)
+        for staff in self.staves_in_tab(tab_index):
+            self.update_staff_display(staff)  # a transposing instrument shows another key
 
     def insert_part(self, index, part):
         """Add a part to the score with its own tab, at position `index`."""
@@ -1132,11 +1314,11 @@ class MainWindow(QMainWindow):
         """Slot: play every tab together, or resume if paused."""
         self.player.play(self.score)
 
-    def on_note_started(self, part_index, note_index):
-        """Slot: move the cursor on that part's tab."""
-        staff = self.staff_at(part_index)  # tab i shows score.parts[i]
-        if staff is not None:
-            staff.set_playing_index(note_index)
+    def on_note_started(self, part_index, staff_index, note_index):
+        """Slot: move the cursor on that part's tab (on the right staff of a grand staff)."""
+        staves = self.staves_in_tab(part_index)  # tab i shows score.parts[i]
+        if staff_index < len(staves):
+            staves[staff_index].set_playing_index(note_index)
 
     def on_play_pause(self):
         """Slot for Space: pause if playing, otherwise play."""
@@ -1220,14 +1402,17 @@ class MainWindow(QMainWindow):
 
     def change_hovered_alter(self, direction):
         """Raise (+1) or lower (-1) the note under the mouse by a half step."""
-        staff = self.current_staff()
-        if staff.part.instrument.is_drums:
+        # The staff the mouse is over (a grand staff has two to choose from).
+        hovered = [s for s in self.staves_in_tab(self.tabs.currentIndex())
+                   if s.hovered_note_index() is not None]
+        if self.current_staff().part.instrument.is_drums:
             self.statusBar().showMessage("Drums have no sharps or flats.", 3000)
             return
-        index = staff.hovered_note_index()
-        if index is None:
+        if not hovered:
             self.statusBar().showMessage("Point at a note, then press + or -.", 3000)
             return
+        staff = hovered[0]
+        index = staff.hovered_note_index()
         # Work with the note as it's *shown* (concert pitch view may differ),
         # then convert the result back to written pitch for storing.
         shown = staff.shown.notes[index]
@@ -1274,7 +1459,7 @@ class MainWindow(QMainWindow):
         self.score = score
         self.file_path = path
         if not score.parts:
-            score.add_part(PIANO)  # a score always has at least one instrument
+            score.add_part(GRAND_PIANO)  # a score always has at least one instrument
         for part in score.parts:
             self.show_part(part)
         self.tabs.setCurrentIndex(0)
@@ -1393,7 +1578,7 @@ def main():
     app = QApplication(sys.argv)  # every Qt program needs exactly one of these
 
     window = MainWindow()
-    window.resize(800, 330)
+    window.resize(800, 500)  # tall enough for a grand staff's two staves
     window.show()
 
     # Start the event loop: Qt now waits for clicks, key presses, and repaint

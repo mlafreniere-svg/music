@@ -143,6 +143,16 @@ def test_repeated_note_is_released_before_replaying():
     assert at_480 == [0x80, 0x90]  # off, then on
 
 
+def test_grand_staff_exports_both_hands_on_one_channel():
+    score = Score()
+    piano = score.add_part(find_instrument("Piano (grand staff)"))
+    piano.notes = [Note(-2)]          # middle C, right hand
+    piano.lower.notes = [Note(3)]     # C3, left hand (bass staff: G2 A2 B2 C3)
+    _, tracks = read_midi(score_to_midi(score))
+    assert len(tracks) == 2  # conductor + one piano track
+    assert notes_in(tracks[1]) == [(0, 480, 0, 48), (0, 480, 0, 60)]
+
+
 def test_export_writes_a_file(tmp_path):
     score = Score()
     score.add_part(find_instrument("Violin")).notes = [Note(0)]

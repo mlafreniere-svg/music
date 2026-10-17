@@ -175,10 +175,19 @@ class Instrument:
     # Which bank of the SoundFont the sound comes from. Bank 0 holds the
     # normal instruments; bank 128 holds the drum kits.
     bank: int = 0
+    # Grand staff: two staves (treble for the right hand, bass for the left),
+    # joined by a brace, as piano music is written.
+    grand: bool = False
 
     @property
     def is_drums(self):
         return self.clef == PERCUSSION
+
+    @property
+    def bass_staff(self):
+        """For a grand-staff instrument: the same sound, written in bass clef
+        (the lower staff's instrument)."""
+        return Instrument(self.name, self.program, "bass", self.transpose, self.bank)
 
     @property
     def concert_offset(self):
@@ -227,7 +236,14 @@ def nearest_drum_step(step):
 
 # The instruments the "+" menu offers, in groups (the menu shows the headings).
 PIANO = Instrument("Piano", 0, "treble")
+GRAND_PIANO = Instrument("Piano (grand staff)", 0, "treble", grand=True)
 INSTRUMENT_GROUPS = [
+    ("Keyboards (grand staff)", [
+        GRAND_PIANO,
+        Instrument("Organ (grand staff)", 19, "treble", grand=True),
+        Instrument("Harp (grand staff)", 46, "treble", grand=True),
+        Instrument("Marimba (grand staff)", 12, "treble", grand=True),
+    ]),
     ("Treble clef", [
         PIANO,
         Instrument("Organ", 19, "treble"),
@@ -347,11 +363,25 @@ class Part:
     instrument: Instrument = PIANO
     muted: bool = False   # Mute: silence this part
     soloed: bool = False  # Solo: play only the soloed parts
+    # Grand staff only: the lower (bass clef, left hand) staff, as a Part of
+    # its own. This Part's own notes are the upper (treble, right hand) staff.
+    # The two hands play at the same time, each with its own rhythm.
+    lower: "Part | None" = None  # in quotes: Part isn't fully defined yet at this line
+
+    def __post_init__(self):
+        # Dataclasses call __post_init__ right after their own __init__.
+        # A grand-staff part always gets a lower staff.
+        if self.instrument.grand and self.lower is None:
+            self.lower = Part(instrument=self.instrument.bass_staff)
 
     @property
     def clef(self):
         """The clef this part is written in; it comes from the instrument."""
         return self.instrument.clef
+
+    def staves(self):
+        """The part's staves, top to bottom: just itself, or itself and its lower staff."""
+        return [self] if self.lower is None else [self, self.lower]
 
     def sounding_pitch(self, note):
         """The MIDI pitch this note actually sounds at (None for a rest).
@@ -453,6 +483,7 @@ class Part:
                     remaining -= length
                     pieces.append(Piece(
                         note_index=index,
+                        beat=beat - length,  # where this piece starts
                         duration=length,
                         first=len(pieces) == first_piece,
                         tied=False,
@@ -470,6 +501,7 @@ class Piece:
     """One drawn symbol: all or part of a note (see Part.pieces)."""
 
     note_index: int     # which note this is a piece of
+    beat: float         # when the piece starts (lines staves up on a grand staff)
     duration: float     # a single note value: WHOLE, HALF, QUARTER, or EIGHTH
     first: bool         # the note's first piece (where its ♯ ♭ ♮ goes)
     tied: bool          # a tie joins this piece to the next one
@@ -498,6 +530,7 @@ class Event:
     part_index: int   # which part (tab) the note belongs to
     note_index: int   # which note in that part
     pitch: int | None # MIDI pitch, or None for a rest
+    staff: int = 0    # which staff of the part: 0 = upper (or only), 1 = lower
 
 
 @dataclass
@@ -528,12 +561,14 @@ class Score:
         """
         events = []
         for part_index, part in enumerate(self.parts):
-            beat = 0.0
-            for note_index, note in enumerate(part.notes):
-                pitch = part.sounding_pitch(note)  # what you hear, not what's written
-                events.append(Event(beat, True, part_index, note_index, pitch))
-                beat += note.duration
-                events.append(Event(beat, False, part_index, note_index, pitch))
+            # A grand staff's two hands both play, at the same time.
+            for staff_index, staff in enumerate(part.staves()):
+                beat = 0.0
+                for note_index, note in enumerate(staff.notes):
+                    pitch = staff.sounding_pitch(note)  # what you hear, not what's written
+                    events.append(Event(beat, True, part_index, note_index, pitch, staff_index))
+                    beat += note.duration
+                    events.append(Event(beat, False, part_index, note_index, pitch, staff_index))
         # Sort by beat. At the same beat, endings (starts=False) come before
         # beginnings (starts=True), because False sorts before True. So a
         # repeated note is released before it's played again.

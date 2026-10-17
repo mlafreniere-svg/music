@@ -110,6 +110,10 @@ class ChangeInstrument(QUndoCommand):
     def apply(self, instrument, spelling):
         """Set the instrument and give every pitched note its (step, alter)."""
         self.part.instrument = instrument
+        if self.part.lower is not None:
+            # Grand staff (only ever switched to another grand-staff keyboard):
+            # the left hand gets the same sound, in bass clef. Its notes stay put.
+            self.part.lower.instrument = instrument.bass_staff
         # zip pairs up two lists item by item: (note 0, spelling 0), (note 1, ...), ...
         for note, spelled in zip(self.part.notes, spelling):
             if spelled is not None:

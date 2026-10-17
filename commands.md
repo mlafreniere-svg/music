@@ -138,7 +138,7 @@ Keyboard shortcuts inside the app:
 | Concert Pitch | Show transposing instruments at the pitch they sound (Playback toolbar, or View menu / `Alt+V`). |
 | Point at a note + `+` (or `=`) | Raise that note a half step (♭ → ♮ → ♯). |
 | Point at a note + `-` | Lower that note a half step (♯ → ♮ → ♭). |
-| `Backspace` | Delete the last note. |
+| `Backspace` | Delete the last note (on a grand staff: of the staff you last clicked). |
 | `Space` | Play / pause. After a pause, it resumes from the same spot. |
 | `Esc` | Stop and go back to the beginning. |
 | `Ctrl+N` | New score (asks first if there are unsaved changes). |

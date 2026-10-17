@@ -372,6 +372,38 @@ def test_transpose_note_there_and_back():
     # flat, which isn't supported, so it's respelled: same sound, new letter.)
 
 
+GRAND = find_instrument("Piano (grand staff)")
+
+
+def test_grand_staff_part_has_a_bass_clef_lower_staff():
+    part = Part(instrument=GRAND)
+    assert part.clef == "treble"
+    assert part.lower is not None and part.lower.clef == "bass"
+    assert part.lower.instrument.program == GRAND.program  # same sound
+    assert part.staves() == [part, part.lower]
+    assert Part(instrument=VIOLIN).staves() == [Part(instrument=VIOLIN)]  # one staff, no lower
+
+
+def test_grand_staff_parts_do_not_share_a_lower_staff():
+    a, b = Part(instrument=GRAND), Part(instrument=GRAND)
+    a.lower.add_note(Note(0))
+    assert b.lower.notes == []
+
+
+def test_timeline_plays_both_hands_together():
+    score = Score()
+    piano = score.add_part(GRAND)
+    piano.notes = [Note(-2), Note(-2)]   # right hand: two quarter middle Cs
+    piano.lower.notes = [Note(3, HALF)]  # left hand: one half-note C3 (bass staff step 3)
+    starts = [(e.beat, e.staff, e.pitch) for e in score.timeline() if e.starts]
+    assert starts == [(0.0, 0, 60), (0.0, 1, 48), (1.0, 0, 60)]
+
+
+def test_pieces_know_their_beat():
+    part = Part([Note(0), Note(0, HALF), Note(0)])
+    assert [p.beat for p in part.pieces()] == [0.0, 1.0, 3.0]
+
+
 def test_instrument_transpositions_are_sensible():
     for instrument in INSTRUMENTS:
         assert -24 <= instrument.transpose <= 0  # all of ours sound at or below what's written

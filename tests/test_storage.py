@@ -66,6 +66,28 @@ def test_version_1_files_still_load():
     assert score.parts[0].notes[0].step == 3
 
 
+def test_grand_staff_left_hand_is_saved(tmp_path):
+    score = Score()
+    piano = score.add_part(find_instrument("Piano (grand staff)"))
+    piano.notes = [Note(0)]
+    piano.lower.notes = [Note(4, HALF), Note(None)]
+    path = tmp_path / "piano.music.json"
+    save_score(score, path)
+    loaded = load_score(path)
+    assert loaded.parts[0].lower.notes == piano.lower.notes
+    assert loaded == score
+
+
+def test_version_2_files_still_load():
+    old = {
+        "format": "music-staff", "version": 2, "tempo_bpm": 100, "key": 1,
+        "parts": [{"instrument": "Piano", "notes": [{"step": 1, "duration": 1.0, "alter": 1}]}],
+    }
+    score = score_from_dict(old)
+    assert score.parts[0].lower is None  # an old single-staff piano stays single-staff
+    assert score.parts[0].notes[0].alter == 1
+
+
 def test_future_versions_are_rejected():
     data = score_to_dict(make_duet())
     data["version"] = 99

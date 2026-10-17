@@ -17,12 +17,24 @@ from model import Note, Part, Score, find_instrument
 
 FILE_EXTENSION = ".music.json"
 FORMAT_NAME = "music-staff"  # identifies our files among all JSON files
-FORMAT_VERSION = 2           # bump this if the layout of the file ever changes
+FORMAT_VERSION = 3           # bump this if the layout of the file ever changes
 # Version history:
 #   1  tempo, parts, notes (step + duration)
 #   2  adds each note's "alter" (sharp/flat) and the score's "key" signature.
 #      Version 1 files still load: their notes are natural, in C major.
-READABLE_VERSIONS = (1, 2)
+#   3  adds "lower_notes" for grand-staff parts (the left hand).
+#      Older files have no grand staffs, so they load unchanged.
+READABLE_VERSIONS = (1, 2, 3)
+
+
+def notes_to_list(notes):
+    """Notes as plain dicts, ready for JSON."""
+    return [{"step": n.step, "duration": n.duration, "alter": n.alter} for n in notes]
+
+
+def notes_from_list(items):
+    """The reverse of notes_to_list. Missing "alter" (version 1 files) means natural."""
+    return [Note(item["step"], item["duration"], item.get("alter", 0)) for item in items]
 
 
 def score_to_dict(score):
@@ -32,21 +44,22 @@ def score_to_dict(score):
         "version": FORMAT_VERSION,
         "tempo_bpm": score.tempo_bpm,
         "key": score.key,
-        "parts": [
-            {
-                # Save the instrument by name; its program and clef come
-                # from the INSTRUMENTS list when the file is loaded.
-                "instrument": part.instrument.name,
-                "notes": [
-                    {"step": note.step, "duration": note.duration, "alter": note.alter}
-                    for note in part.notes
-                ],
-                # Mute/Solo are deliberately not saved: every file opens
-                # with all parts audible.
-            }
-            for part in score.parts
-        ],
+        "parts": [part_to_dict(part) for part in score.parts],
     }
+
+
+def part_to_dict(part):
+    """One part as a dict. Mute/Solo are deliberately not saved: every file
+    opens with all parts audible."""
+    data = {
+        # Save the instrument by name; its program and clef come from the
+        # INSTRUMENTS list when the file is loaded.
+        "instrument": part.instrument.name,
+        "notes": notes_to_list(part.notes),
+    }
+    if part.lower is not None:
+        data["lower_notes"] = notes_to_list(part.lower.notes)  # the grand staff's left hand
+    return data
 
 
 def score_from_dict(data):
@@ -63,10 +76,10 @@ def score_from_dict(data):
     # how version 1 files (no key, no alter) still load.
     score = Score(tempo_bpm=data["tempo_bpm"], key=data.get("key", 0))
     for part_data in data["parts"]:
-        part = Part(instrument=find_instrument(part_data["instrument"]))
-        for note_data in part_data["notes"]:
-            alter = note_data.get("alter", 0)
-            part.add_note(Note(note_data["step"], note_data["duration"], alter))
+        part = Part(instrument=find_instrument(part_data["instrument"]))  # grand: makes .lower
+        part.notes = notes_from_list(part_data["notes"])
+        if part.lower is not None:
+            part.lower.notes = notes_from_list(part_data.get("lower_notes", []))
         score.parts.append(part)
     return score
 

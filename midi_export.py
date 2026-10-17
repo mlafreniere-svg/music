@@ -77,17 +77,18 @@ def part_track(part, channel):
         (0, 0, meta_event(0x03, part.instrument.name.encode("utf-8"))),  # track name
         (0, 0, bytes([0xC0 | channel, part.instrument.program])),       # program change
     ]
-    beat = 0.0
-    for note in part.notes:
-        pitch = part.sounding_pitch(note)  # transposing instruments: what you hear
-        start = round(beat * TICKS_PER_BEAT)
-        end = round((beat + note.duration) * TICKS_PER_BEAT)
-        if pitch is not None and 0 <= pitch <= 127:  # rests make no events
-            # A status byte is the event type (0x90 note-on, 0x80 note-off)
-            # combined with the channel number (0-15) in its low 4 bits.
-            events.append((start, 1, bytes([0x90 | channel, pitch, VELOCITY])))
-            events.append((end, 0, bytes([0x80 | channel, pitch, 0])))
-        beat += note.duration
+    for staff in part.staves():  # a grand staff's two hands share the track
+        beat = 0.0
+        for note in staff.notes:
+            pitch = staff.sounding_pitch(note)  # transposing instruments: what you hear
+            start = round(beat * TICKS_PER_BEAT)
+            end = round((beat + note.duration) * TICKS_PER_BEAT)
+            if pitch is not None and 0 <= pitch <= 127:  # rests make no events
+                # A status byte is the event type (0x90 note-on, 0x80 note-off)
+                # combined with the channel number (0-15) in its low 4 bits.
+                events.append((start, 1, bytes([0x90 | channel, pitch, VELOCITY])))
+                events.append((end, 0, bytes([0x80 | channel, pitch, 0])))
+            beat += note.duration
     return track_chunk(events)
 
 

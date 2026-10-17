@@ -39,7 +39,7 @@ class Player(QObject):
 
     # Signals this object can send. Other code connects to them, like the
     # toolbar buttons' signals. Signal(int, int) sends two whole numbers.
-    note_started = Signal(int, int)  # (part index, note index) of a note that just started
+    note_started = Signal(int, int, int)  # (part index, staff, note index) of a note that just started
     finished = Signal()              # the score reached its end
     state_changed = Signal(str)      # the new state: STOPPED, PLAYING, or PAUSED
 
@@ -158,7 +158,7 @@ class Player(QObject):
                 if event.pitch is not None and self.is_audible(event.part_index):
                     self.synth.noteon(channel, event.pitch, VELOCITY)
                     self.sounding.add((channel, event.pitch))
-                self.note_started.emit(event.part_index, event.note_index)
+                self.note_started.emit(event.part_index, event.staff, event.note_index)
             elif event.pitch is not None:
                 self.synth.noteoff(channel, event.pitch)
                 self.sounding.discard((channel, event.pitch))  # discard: remove if present
