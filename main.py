@@ -202,7 +202,8 @@ class StaffWidget(QWidget):
         The staff sits inside a scroll area. When the staff is wider than
         the window, the scroll area shows a scroll bar.
         """
-        self.setMinimumWidth(round(self.note_x(len(self.part.notes)) + EMPTY_SPACE_AT_END))
+        columns = len(self.part.pieces())
+        self.setMinimumWidth(round(self.column_x(columns) + EMPTY_SPACE_AT_END))
 
     def refresh(self):
         """After the part's notes change: resize and redraw."""
@@ -231,33 +232,55 @@ class StaffWidget(QWidget):
         leaving room for a ♯, ♭ or ♮ in front of it."""
         return max(FIRST_NOTE_X, self.key_signature_right() + ROOM_BEFORE_FIRST_NOTE)
 
+    # The staff is drawn in columns, one per *piece* (see Part.pieces): a note
+    # tied across a bar line takes two or more columns.
+
+    def column_x(self, column):
+        """The x position of a column (0 = first)."""
+        return self.first_note_x() + column * NOTE_SPACING
+
+    def note_columns(self):
+        """For each note, the list of columns its pieces are drawn in."""
+        columns = [[] for _ in self.part.notes]  # one empty list per note
+        for column, piece in enumerate(self.part.pieces()):
+            columns[piece.note_index].append(column)
+        return columns
+
     def note_x(self, index):
-        """The x position of the note at this place in the list (0 = first)."""
-        return self.first_note_x() + index * NOTE_SPACING
+        """The x position of a note's first piece (or just past the end)."""
+        columns = self.note_columns()
+        if 0 <= index < len(columns):
+            return self.column_x(columns[index][0])
+        return self.column_x(len(self.part.pieces()))  # where the next note will go
+
+    def column_at(self, x):
+        """Which column is at this x position, or None if none is."""
+        column = round((x - self.first_note_x()) / NOTE_SPACING)
+        return column if 0 <= column < len(self.part.pieces()) else None
 
     def note_index_at(self, x):
-        """The reverse of note_x: which note is at this x position?
+        """Which note is at this x position? (Any of its pieces counts.)
 
         Returns the note's index, or None if there's no note there.
         """
-        index = round((x - self.first_note_x()) / NOTE_SPACING)
-        if 0 <= index < len(self.part.notes):
-            return index
-        return None
+        column = self.column_at(x)
+        return None if column is None else self.part.pieces()[column].note_index
 
     def note_head_at(self, pos):
         """The index of the note whose head is under this point, or None.
 
-        Rests don't count, since they can't be dragged to a new pitch.
+        Any piece of a tied note counts. Rests don't count, since they
+        can't be dragged to a new pitch.
         """
-        index = self.note_index_at(pos.x())
-        if index is None:
+        column = self.column_at(pos.x())
+        if column is None:
             return None
+        index = self.part.pieces()[column].note_index
         note = self.part.notes[index]
         if note.is_rest:
             return None
         # abs() is the distance ignoring direction: abs(-3) is 3.
-        close_in_x = abs(pos.x() - self.note_x(index)) <= NOTE_HEAD_WIDTH * 0.75
+        close_in_x = abs(pos.x() - self.column_x(column)) <= NOTE_HEAD_WIDTH * 0.75
         close_in_y = abs(pos.y() - step_to_y(note.step)) <= NOTE_HEAD_HEIGHT * 0.75
         return index if close_in_x and close_in_y else None
 
@@ -350,12 +373,17 @@ class StaffWidget(QWidget):
         painter.setRenderHint(QPainter.Antialiasing)  # smooth edges
         painter.fillRect(self.rect(), Qt.white)        # paper background
 
+        pieces = self.part.pieces()
+
         # The cursor goes first, so the staff and notes are drawn on top of it.
-        if self.playing_index is not None:
-            x = self.note_x(self.playing_index)
+        # It covers every column of the playing note (all its tied pieces).
+        columns = self.note_columns()
+        if self.playing_index is not None and self.playing_index < len(columns):
+            left = self.column_x(columns[self.playing_index][0]) - NOTE_SPACING / 2
+            right = self.column_x(columns[self.playing_index][-1]) + NOTE_SPACING / 2
             top = step_to_y(HIGHEST_STEP + 2)
             bottom = step_to_y(LOWEST_STEP - 2)
-            painter.fillRect(QRectF(x - NOTE_SPACING / 2, top, NOTE_SPACING, bottom - top), CURSOR_COLOR)
+            painter.fillRect(QRectF(left, top, right - left, bottom - top), CURSOR_COLOR)
 
         painter.setPen(QPen(self.ink, 1))
 
@@ -366,21 +394,26 @@ class StaffWidget(QWidget):
         self.draw_clef(painter)
         self.draw_key_signature(painter)
 
-        # Draw every note. The whole picture is redrawn from self.part each
+        # Draw every piece. The whole picture is redrawn from self.part each
         # time, so the model is the "truth" and the picture just shows it.
+        # The model decides how notes are split and tied (pieces) and which
+        # ♯ ♭ ♮ signs are needed (accidental_signs).
         # enumerate gives each item along with its position: (0, first), (1, second), ...
-        # The model decides which ♯ ♭ ♮ signs are needed (standard notation rule).
         signs = self.part.accidental_signs(self.key)
-        for index, note in enumerate(self.part.notes):
-            self.draw_note(painter, self.note_x(index), note)
-            if signs[index] is not None:
-                self.draw_accidental(painter, self.note_x(index), note.step, signs[index])
+        bar_lines = []
+        for column, piece in enumerate(pieces):
+            note = self.part.notes[piece.note_index]
+            x = self.column_x(column)
+            self.draw_note(painter, x, note, piece.duration)
+            if piece.first and signs[piece.note_index] is not None:
+                self.draw_accidental(painter, x, note.step, signs[piece.note_index])  # only once per note
+            if piece.tied:
+                self.draw_tie(painter, x, self.column_x(column + 1), note.step)
+            if piece.ends_measure:
+                bar_lines.append(x + NOTE_SPACING / 2)  # halfway to the next column
 
-        # Bar lines: the model says where measures end; we draw a line
-        # halfway between that note and the next one.
         painter.setPen(QPen(self.ink, 1))
-        for index in self.part.measure_ends():
-            x = self.note_x(index) + NOTE_SPACING / 2
+        for x in bar_lines:
             painter.drawLine(QPointF(x, step_to_y(TOP_LINE_STEP)), QPointF(x, step_to_y(0)))
 
     def clef_layout(self):
@@ -456,10 +489,35 @@ class StaffWidget(QWidget):
         painter.setPen(QPen(self.ink, 1))
         painter.drawText(QPointF(right - outline.right(), baseline), symbol)
 
-    def draw_note(self, painter, x, note):
-        """Draw one note at horizontal position x, shaped by its duration."""
+    def draw_tie(self, painter, x1, x2, step):
+        """Draw a tie: a thin curved band from the note head at x1 to the one at x2.
+
+        Ties curve away from the stems: below the notes when stems go up,
+        above when they go down.
+        """
+        direction = 1 if step < MIDDLE_LINE_STEP else -1  # +1 = curve downward (y grows down)
+        y = step_to_y(step) + direction * NOTE_HEAD_HEIGHT * 0.6
+        start = QPointF(x1 + NOTE_HEAD_WIDTH * 0.3, y)
+        end = QPointF(x2 - NOTE_HEAD_WIDTH * 0.3, y)
+        middle_x = (x1 + x2) / 2
+        # Two curves between the same ends, one bulging further than the
+        # other; filling between them gives a tie that's thick in the middle
+        # and thin at the ends, like a printed one.
+        path = QPainterPath(start)
+        path.quadTo(QPointF(middle_x, y + direction * LINE_SPACING * 0.9), end)
+        path.quadTo(QPointF(middle_x, y + direction * LINE_SPACING * 0.65), start)
+        painter.setPen(QPen(self.ink, 0.8))
+        painter.setBrush(self.ink)
+        painter.drawPath(path)
+
+    def draw_note(self, painter, x, note, duration):
+        """Draw a note (or one piece of it) at x, shaped by `duration`.
+
+        `duration` is passed separately because a tied note's pieces can be
+        shorter than the note itself.
+        """
         if note.is_rest:
-            self.draw_rest(painter, x, note.duration)
+            self.draw_rest(painter, x, duration)
             return
 
         y = step_to_y(note.step)
@@ -467,7 +525,7 @@ class StaffWidget(QWidget):
 
         # Note head: whole and half notes are hollow; shorter notes are filled.
         # The pen draws outlines; the brush fills the inside.
-        if note.duration >= HALF:
+        if duration >= HALF:
             painter.setPen(QPen(self.ink, 1.8))  # thicker outline for hollow heads
             painter.setBrush(Qt.NoBrush)
         else:
@@ -476,7 +534,7 @@ class StaffWidget(QWidget):
         painter.drawEllipse(QPointF(x, y), NOTE_HEAD_WIDTH / 2, NOTE_HEAD_HEIGHT / 2)
         painter.setPen(QPen(self.ink, 1))
 
-        if note.duration == WHOLE:
+        if duration == WHOLE:
             return  # whole notes have no stem
 
         # Notation rule: notes below the middle line have stems going up on
@@ -489,7 +547,7 @@ class StaffWidget(QWidget):
             stem_end_y = y + STEM_LENGTH
         painter.drawLine(QPointF(stem_x, y), QPointF(stem_x, stem_end_y))
 
-        if note.duration == EIGHTH:
+        if duration == EIGHTH:
             self.draw_flag(painter, stem_x, stem_end_y, stem_up=note.step < MIDDLE_LINE_STEP)
 
     def draw_flag(self, painter, stem_x, stem_end_y, stem_up):

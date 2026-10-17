@@ -10,7 +10,7 @@ import pytest
 from model import (
     EIGHTH, FLAT, HALF, INSTRUMENTS, KEY_NAMES, NATURAL, PIANO, QUARTER, SHARP, WHOLE,
     Note, Part, Score, clef_change_shift, find_instrument, key_alter, key_name, letter_of,
-    step_to_midi,
+    split_duration, step_to_midi,
 )
 
 
@@ -101,21 +101,57 @@ def test_insert_part_puts_it_back_in_place():
 
 # --- Measures ------------------------------------------------------------
 
-def test_measure_ends_with_exact_measures():
+def describe(part):
+    """Pieces as short tuples: (note index, duration, tied?, bar line after?)."""
+    return [(p.note_index, p.duration, p.tied, p.ends_measure) for p in part.pieces()]
+
+
+def test_notes_that_fit_are_one_piece_each():
     part = Part([Note(0, WHOLE), Note(0, HALF), Note(0, HALF), Note(0)])
-    assert part.measure_ends() == [0, 2]
+    assert describe(part) == [
+        (0, WHOLE, False, True),   # bar line after the whole note
+        (1, HALF, False, False),
+        (2, HALF, False, True),    # ... and after the 2 halves
+        (3, QUARTER, False, False),
+    ]
 
 
-def test_measure_ends_with_eighths():
+def test_eighths_fill_a_measure():
     part = Part([Note(0, EIGHTH)] * 8)  # eight eighths = one measure
-    assert part.measure_ends() == [7]
+    assert [p.ends_measure for p in part.pieces()] == [False] * 7 + [True]
 
 
-def test_measure_ends_when_a_note_overflows():
-    # 3 quarters + a half = 5 beats: the bar line goes after the half note.
-    # (Ties will handle this properly later; see projectplan.md.)
+def test_a_note_across_the_bar_line_is_split_and_tied():
+    # 3 quarters + a half note: the half note starts on beat 4, so it's
+    # written as a quarter (end of measure 1) tied to a quarter (measure 2).
     part = Part([Note(0), Note(0), Note(0), Note(0, HALF)])
-    assert part.measure_ends() == [3]
+    assert describe(part)[3:] == [(3, QUARTER, True, True), (3, QUARTER, False, False)]
+
+
+def test_odd_lengths_become_tied_note_values():
+    # A whole note starting on beat 2: 3 beats left (half + quarter, tied), then 1 more.
+    part = Part([Note(0), Note(0, WHOLE)])
+    assert describe(part)[1:] == [
+        (1, HALF, True, False),
+        (1, QUARTER, True, True),
+        (1, QUARTER, False, False),
+    ]
+
+
+def test_rests_split_but_are_never_tied():
+    part = Part([Note(0), Note(0), Note(0), Note(None, HALF)])
+    assert describe(part)[3:] == [(3, QUARTER, False, True), (3, QUARTER, False, False)]
+
+
+def test_only_the_first_piece_is_marked_first():
+    part = Part([Note(0), Note(0), Note(0), Note(0, HALF)])
+    assert [p.first for p in part.pieces()] == [True, True, True, True, False]
+
+
+def test_split_duration():
+    assert split_duration(3.0) == [HALF, QUARTER]
+    assert split_duration(1.5) == [QUARTER, EIGHTH]
+    assert split_duration(4.0) == [WHOLE]
 
 
 # --- Sharps, flats, and key signatures -----------------------------------

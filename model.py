@@ -268,23 +268,65 @@ class Part:
             beats += note.duration
         return signs
 
-    def measure_ends(self):
-        """The positions (indexes) of the notes that finish a measure.
+    def pieces(self):
+        """How to *write* the notes: each note split into drawable pieces.
 
-        A bar line belongs right after each of these notes. We add up the
-        beats as we go; whenever the total passes into a new measure, the
-        note that got us there ends the old one.
+        A note that doesn't fit in what's left of its measure is split at the
+        bar line, and the pieces are joined by ties: a half note starting on
+        beat 4 is written as two quarter notes, tied. Lengths that aren't a
+        single note value (like 3 beats) are split too (half + quarter).
+        Rests are split the same way, but rests are never tied.
+
+        The notes themselves don't change: a tied half note still *sounds*
+        like one half note. This only decides how it's drawn.
         """
-        ends = []
-        beats = 0.0
+        pieces = []
+        beat = 0.0
         for index, note in enumerate(self.notes):
-            # // is "floor division": divide and drop the remainder.
-            # 7 // 4 is 1, so beat 7 is in measure 1 (counting from 0).
-            measure_before = beats // BEATS_PER_MEASURE
-            beats += note.duration
-            if beats // BEATS_PER_MEASURE > measure_before:
-                ends.append(index)
-        return ends
+            first_piece = len(pieces)
+            remaining = note.duration
+            while remaining > 0:
+                # % is the remainder: how far into the current measure we are.
+                room = BEATS_PER_MEASURE - beat % BEATS_PER_MEASURE
+                for length in split_duration(min(remaining, room)):
+                    beat += length
+                    remaining -= length
+                    pieces.append(Piece(
+                        note_index=index,
+                        duration=length,
+                        first=len(pieces) == first_piece,
+                        tied=False,
+                        ends_measure=beat % BEATS_PER_MEASURE == 0,
+                    ))
+            if not note.is_rest:
+                # Tie every piece of this note to the next one, except the last.
+                for piece in pieces[first_piece:-1]:
+                    piece.tied = True
+        return pieces
+
+
+@dataclass
+class Piece:
+    """One drawn symbol: all or part of a note (see Part.pieces)."""
+
+    note_index: int     # which note this is a piece of
+    duration: float     # a single note value: WHOLE, HALF, QUARTER, or EIGHTH
+    first: bool         # the note's first piece (where its ♯ ♭ ♮ goes)
+    tied: bool          # a tie joins this piece to the next one
+    ends_measure: bool  # a bar line comes right after this piece
+
+
+NOTE_VALUES = [WHOLE, HALF, QUARTER, EIGHTH]  # longest first
+
+
+def split_duration(beats):
+    """Split a length into note values, longest first: 3 beats -> [2.0, 1.0]."""
+    parts = []
+    for value in NOTE_VALUES:
+        while beats >= value:
+            parts.append(value)
+            beats -= value
+    return parts
 
 
 @dataclass(frozen=True)
