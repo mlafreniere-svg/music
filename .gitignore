@@ -9,6 +9,8 @@ venv/
 # Ignore everything in saved_music except the placeholder that keeps the folder.
 saved_music/*
 !saved_music/.gitkeep
+# Exported MIDI files are songs too, wherever they're saved.
+*.mid
 
 # SoundFonts are large binaries; download them separately
 *.sf2

@@ -144,6 +144,7 @@ Keyboard shortcuts inside the app:
 | `Ctrl+O` | Open a saved score (`.music.json`). |
 | `Ctrl+S` | Save. The first time, it asks for a file name. |
 | `Ctrl+Shift+S` | Save As: save under a new name. |
+| `Ctrl+E` | Export MIDI: a `.mid` file that MuseScore, a DAW, or any music program can open. |
 | `Alt+F` | Open the File menu. |
 | `Ctrl+Z` | Undo the last edit (notes, drags, tabs, tempo). Repeat to go further back. |
 | `Ctrl+Y` | Redo what you just undid. |

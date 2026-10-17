@@ -22,6 +22,7 @@ from edits import (
     AddNote, AddPart, ChangeAlter, ChangeInstrument, ChangeKey, ChangeTempo, MoveNote,
     RemoveNote, RemovePart,
 )
+from midi_export import export_midi
 from player import MAX_PARTS, PAUSED, PLAYING, STOPPED, Player
 from storage import FILE_EXTENSION, display_name, load_score, save_score
 
@@ -1129,6 +1130,7 @@ class MainWindow(QMainWindow):
             ("&Open...", QKeySequence.Open, self.open_file),
             ("&Save", QKeySequence.Save, self.save),
             ("Save &As...", QKeySequence.SaveAs, self.save_as),
+            ("&Export MIDI...", QKeySequence("Ctrl+E"), self.export_midi_file),
         ]:
             action = menu.addAction(text)
             action.setShortcut(shortcut)
@@ -1263,6 +1265,24 @@ class MainWindow(QMainWindow):
         if not path.endswith(FILE_EXTENSION):
             path = str(Path(path).with_suffix("")) + FILE_EXTENSION
         return self.write_file(path)
+
+    def export_midi_file(self):
+        """Save the score as a standard .mid file other music programs can open."""
+        # Suggest the score's own name, e.g. "Hot Cross Buns.mid".
+        name = display_name(self.file_path) if self.file_path else "Untitled"
+        suggested = str(Path(self.start_folder()) / f"{name}.mid")
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export MIDI", suggested, "MIDI files (*.mid);;All files (*)")
+        if not path:
+            return  # cancelled
+        if not path.lower().endswith(".mid"):
+            path += ".mid"
+        try:
+            export_midi(self.score, path)
+        except OSError as error:
+            QMessageBox.warning(self, "Couldn't export MIDI", f"{path}\n\n{error}")
+            return
+        self.statusBar().showMessage(f"Exported {path}", 3000)
 
     def write_file(self, path):
         try:
