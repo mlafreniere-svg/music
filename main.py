@@ -1,12 +1,19 @@
 """Music staff app: the program's starting point. Run with: python main.py"""
 
 import sys
+from dataclasses import dataclass
 
 from PySide6.QtCore import QPointF, QRectF, Qt
-from PySide6.QtGui import QAction, QActionGroup, QColor, QPainter, QPainterPath, QPen
-from PySide6.QtWidgets import QApplication, QLabel, QMainWindow, QSlider, QWidget
+from PySide6.QtGui import (
+    QAction, QActionGroup, QColor, QFont, QFontMetricsF, QPainter, QPainterPath, QPen,
+)
+from PySide6.QtWidgets import (
+    QApplication, QLabel, QMainWindow, QMenu, QSlider, QTabWidget, QToolButton, QWidget,
+)
 
-from model import EIGHTH, HALF, QUARTER, WHOLE, Note, Part  # our own model.py
+from model import (  # our own model.py
+    EIGHTH, HALF, INSTRUMENTS, PIANO, QUARTER, WHOLE, Note, Score,
+)
 from player import PAUSED, PLAYING, STOPPED, Player
 
 # Layout measurements, in pixels. Keeping them as named constants (instead of
@@ -21,7 +28,7 @@ NOTE_HEAD_HEIGHT = LINE_SPACING        # exactly fills one space between lines
 STEM_LENGTH = LINE_SPACING * 3.5
 
 # Horizontal layout: notes are placed left to right, one after another.
-FIRST_NOTE_X = MARGIN + 60  # leaves room at the start for a clef later
+FIRST_NOTE_X = MARGIN + 75  # leaves room at the start for the clef
 NOTE_SPACING = 40           # distance from one note to the next
 
 # Pitches are stored as "staff steps": 0 is the bottom line, 1 the space
@@ -47,9 +54,35 @@ DURATION_CHOICES = [
 # QColor(red, green, blue, alpha): alpha 0 is invisible, 255 is solid.
 CURSOR_COLOR = QColor(70, 130, 230, 60)
 
+# Clef symbols are characters in the "Segoe UI Symbol" font that comes with
+# Windows. \U0001D11E is the character's Unicode number (its ID in a
+# worldwide table of every character).
+CLEF_SYMBOLS = {
+    "treble": "\U0001D11E",  # 𝄞
+    "bass": "\U0001D122",    # 𝄢
+}
+CLEF_FONT = "Segoe UI Symbol"
+# Where each clef's outline should start and end, in staff steps
+# (the top line is step 8, the bottom line step 0):
+#   treble rises above the top line and dips below the bottom line;
+#   bass runs from the top line down to just above the bottom line.
+CLEF_TOP_STEP = {"treble": 10.6, "bass": 8.7}
+CLEF_BOTTOM_STEP = {"treble": -3.0, "bass": 1.9}
+
 MIN_TEMPO = 40   # beats per minute
 MAX_TEMPO = 200
 
+
+@dataclass
+class EditSettings:
+    """What the next click on any staff will add. The toolbar changes these.
+
+    All the tabs share ONE EditSettings object, so choosing "Half" applies
+    to every tab, including tabs added later.
+    """
+
+    duration: float = QUARTER
+    rest_mode: bool = False  # when True, clicks add rests instead of notes
 
 
 def step_to_y(step):
@@ -70,16 +103,14 @@ class StaffWidget(QWidget):
     already do, and we only add the part that's ours, the drawing.
     """
 
-    def __init__(self):
+    def __init__(self, part, settings):
         # __init__ runs once, when the widget is created.
         super().__init__()  # first, let QWidget set itself up
         # The music being shown. The widget only draws it and edits it;
         # what a note *is* lives in model.py.
-        self.part = Part()
-        # The duration that the next click will use. The toolbar changes it.
-        self.current_duration = QUARTER
-        # When True, clicks add rests instead of notes. The Rest button changes it.
-        self.rest_mode = False
+        self.part = part
+        # The shared EditSettings: which duration, and notes or rests.
+        self.settings = settings
         # The index of the note being played, or None when nothing is playing.
         self.playing_index = None
 
@@ -122,11 +153,11 @@ class StaffWidget(QWidget):
         # (Scrolling for longer pieces comes in a later milestone.)
         if self.note_x(len(self.part.notes)) > self.width() - MARGIN:
             return
-        if self.rest_mode:
+        if self.settings.rest_mode:
             step = None  # a rest has no pitch, so the click's height doesn't matter
         else:
             step = y_to_step(event.position().y())
-        self.part.add_note(Note(step, self.current_duration))
+        self.part.add_note(Note(step, self.settings.duration))
         self.update()  # ask Qt to repaint soon; it will call paintEvent
 
     def paintEvent(self, event):
@@ -150,6 +181,7 @@ class StaffWidget(QWidget):
         for step in range(0, TOP_LINE_STEP + 1, 2):  # steps 0, 2, 4, 6, 8
             y = step_to_y(step)
             painter.drawLine(QPointF(MARGIN, y), QPointF(right_edge, y))
+        self.draw_clef(painter)
 
         # Draw every note. The whole picture is redrawn from self.part each
         # time, so the model is the "truth" and the picture just shows it.
@@ -163,6 +195,28 @@ class StaffWidget(QWidget):
         for index in self.part.measure_ends():
             x = self.note_x(index) + NOTE_SPACING / 2
             painter.drawLine(QPointF(x, step_to_y(TOP_LINE_STEP)), QPointF(x, step_to_y(0)))
+
+    def draw_clef(self, painter):
+        """Draw the part's clef symbol at the start of the staff."""
+        clef = self.part.clef
+        symbol = CLEF_SYMBOLS[clef]
+        top = step_to_y(CLEF_TOP_STEP[clef])
+        bottom = step_to_y(CLEF_BOTTOM_STEP[clef])
+
+        # Measure the symbol at a test size, then scale the font so its exact
+        # outline (its "tight bounding rectangle") is as tall as we want.
+        font = QFont(CLEF_FONT)
+        font.setPixelSize(100)
+        test_height = QFontMetricsF(font).tightBoundingRect(symbol).height()
+        font.setPixelSize(round(100 * (bottom - top) / test_height))
+        outline = QFontMetricsF(font).tightBoundingRect(symbol)
+
+        # drawText places the text's *baseline* (the line letters sit on).
+        # outline.top() is how far the symbol reaches above its baseline
+        # (a negative number), so this puts the symbol's top exactly at `top`.
+        painter.setFont(font)
+        position = QPointF(MARGIN + 8 - outline.left(), top - outline.top())
+        painter.drawText(position, symbol)
 
     def draw_note(self, painter, x, note):
         """Draw one note at horizontal position x, shaped by its duration."""
@@ -272,7 +326,7 @@ class StaffWidget(QWidget):
 
 
 class MainWindow(QMainWindow):
-    """The application window: a toolbar on top, the staff in the middle.
+    """The application window: toolbars on top, one tab per instrument below.
 
     QMainWindow already has places for toolbars, menus, and a status bar;
     we fill them in.
@@ -282,8 +336,33 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("Music Staff")
 
-        self.staff = StaffWidget()
-        self.setCentralWidget(self.staff)  # the staff fills the middle
+        self.score = Score()            # all the music: one Part per tab
+        self.settings = EditSettings()  # shared by every tab's staff
+        self.playing_staff = None       # the staff whose part is playing, if any
+
+        # The tabs. Tab number i always shows score.parts[i]: tabs can't be
+        # dragged into a new order, so the two lists stay lined up.
+        self.tabs = QTabWidget()
+        self.tabs.setTabsClosable(True)  # an x on each tab
+        self.tabs.tabCloseRequested.connect(self.on_close_tab)
+        self.setCentralWidget(self.tabs)
+
+        # The "+ Instrument" button, in the corner beside the tabs. Clicking it
+        # opens a menu with one entry per instrument.
+        instrument_menu = QMenu(self)
+        for instrument in INSTRUMENTS:
+            if instrument.name == "Piano (bass)":
+                instrument_menu.addSeparator()  # a divider between treble and bass
+            action = instrument_menu.addAction(f"{instrument.name}  ({instrument.clef})")
+            action.setData(instrument)  # remember which instrument this entry means
+        instrument_menu.triggered.connect(self.on_add_instrument)
+        add_button = QToolButton()
+        add_button.setText("+ Instrument")
+        add_button.setMenu(instrument_menu)
+        add_button.setPopupMode(QToolButton.InstantPopup)  # open the menu on click
+        self.tabs.setCornerWidget(add_button, Qt.TopRightCorner)
+
+        self.add_tab(PIANO)  # every score starts with a piano
 
         toolbar = self.addToolBar("Editing")
         # A QActionGroup makes its buttons work like radio buttons:
@@ -294,7 +373,7 @@ class MainWindow(QMainWindow):
             action.setCheckable(True)        # stays pressed in when chosen
             action.setShortcut(shortcut)     # pressing the key = clicking the button
             action.setData(duration)         # remember which duration this button means
-            action.setChecked(duration == self.staff.current_duration)
+            action.setChecked(duration == self.settings.duration)
             self.duration_group.addAction(action)
             toolbar.addAction(action)
 
@@ -316,8 +395,7 @@ class MainWindow(QMainWindow):
         toolbar.addSeparator()
         self.delete_last_action = QAction("Delete Last (Backspace)", self)
         self.delete_last_action.setShortcut("Backspace")
-        # A slot can be any method, even one on another object.
-        self.delete_last_action.triggered.connect(self.staff.delete_last_note)
+        self.delete_last_action.triggered.connect(self.on_delete_last)
         toolbar.addAction(self.delete_last_action)
 
         # Transport controls: the buttons that control playback. They get
@@ -365,20 +443,75 @@ class MainWindow(QMainWindow):
 
         # Keep the buttons and the cursor in step with the player.
         self.player.state_changed.connect(self.update_transport_buttons)
-        self.player.note_started.connect(self.staff.set_playing_index)
+        self.player.note_started.connect(self.on_note_started)
         self.update_transport_buttons(self.player.state)
+
+    # --- Tabs ---------------------------------------------------------------
+
+    def current_staff(self):
+        """The staff in the tab that's open right now."""
+        return self.tabs.currentWidget()
+
+    def add_tab(self, instrument):
+        """Add a part for this instrument to the score, with a tab to show it."""
+        part = self.score.add_part(instrument)
+        staff = StaffWidget(part, self.settings)
+        index = self.tabs.addTab(staff, self.unused_tab_label(instrument.name))
+        self.tabs.setCurrentIndex(index)  # switch to the new tab
+
+    def unused_tab_label(self, name):
+        """A tab label not already in use: "Violin", else "Violin 2", "Violin 3", ..."""
+        labels = {self.tabs.tabText(i) for i in range(self.tabs.count())}  # a set
+        label = name
+        number = 1
+        while label in labels:  # keep trying until we find a free label
+            number += 1
+            label = f"{name} {number}"
+        return label
+
+    def on_add_instrument(self, action):
+        """Slot: an instrument was chosen from the "+ Instrument" menu."""
+        self.add_tab(action.data())
+
+    def on_close_tab(self, index):
+        """Slot: the x on a tab was clicked."""
+        if self.tabs.count() == 1:
+            # The status bar is the strip along the bottom of the window.
+            self.statusBar().showMessage("A score needs at least one instrument.", 3000)
+            return
+        staff = self.tabs.widget(index)
+        if staff is self.playing_staff:
+            self.player.stop()  # don't keep playing a part that's being removed
+        self.tabs.removeTab(index)
+        self.score.remove_part(index)  # keep the score lined up with the tabs
+        staff.deleteLater()  # free the widget once Qt is done with it
+
+    # --- Editing ------------------------------------------------------------
 
     def on_duration_chosen(self, action):
         """Slot: called by Qt when a duration button is chosen."""
-        self.staff.current_duration = action.data()
+        self.settings.duration = action.data()
 
     def on_rest_toggled(self, checked):
         """Slot: called by Qt when the Rest button is switched on or off."""
-        self.staff.rest_mode = checked
+        self.settings.rest_mode = checked
+
+    def on_delete_last(self):
+        """Slot: delete the last note in the open tab."""
+        self.current_staff().delete_last_note()
+
+    # --- Playback -----------------------------------------------------------
 
     def on_play(self):
-        """Slot: start playing, or resume if paused."""
-        self.player.play(self.staff.part)
+        """Slot: play the open tab, or resume if paused."""
+        if self.player.state != PAUSED:
+            self.playing_staff = self.current_staff()
+        self.player.play(self.playing_staff.part)
+
+    def on_note_started(self, index):
+        """Slot: move the cursor on the staff that's playing."""
+        if self.playing_staff is not None:
+            self.playing_staff.set_playing_index(index)
 
     def on_play_pause(self):
         """Slot for Space: pause if playing, otherwise play."""
@@ -397,8 +530,9 @@ class MainWindow(QMainWindow):
         self.stop_action.setEnabled(state in (PLAYING, PAUSED))
         # "Play" means "Resume" while paused; the label says so.
         self.play_action.setText("Resume" if state == PAUSED else "Play")
-        if state == STOPPED:
-            self.staff.set_playing_index(None)  # hide the cursor
+        if state == STOPPED and self.playing_staff is not None:
+            self.playing_staff.set_playing_index(None)  # hide the cursor
+            self.playing_staff = None
 
     def on_tempo_changed(self, bpm):
         """Slot: the tempo slider moved."""

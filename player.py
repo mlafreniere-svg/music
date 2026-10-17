@@ -45,8 +45,8 @@ class Player(QObject):
         self.synth.audio_driver = fluidsynth.new_fluid_audio_driver(
             self.synth.settings, self.synth.synth
         )
-        soundfont_id = self.synth.sfload(str(SOUNDFONT))
-        self.synth.program_select(CHANNEL, soundfont_id, 0, PIANO)
+        self.soundfont_id = self.synth.sfload(str(SOUNDFONT))
+        self.synth.program_select(CHANNEL, self.soundfont_id, 0, PIANO)
 
         # A single-shot timer fires once, after the delay we give it.
         # PreciseTimer asks Windows for millisecond accuracy.
@@ -69,7 +69,7 @@ class Player(QObject):
         self.state = state
         self.state_changed.emit(state)
 
-    def play(self, part, clef="treble"):
+    def play(self, part):
         """Resume if paused; otherwise start the part from the beginning."""
         if self.state == PAUSED:
             self.resume()
@@ -78,7 +78,9 @@ class Player(QObject):
         # Copy the list, so editing the staff during playback can't change
         # what's being played halfway through.
         self.notes = list(part.notes)
-        self.clef = clef
+        self.clef = part.clef  # the same staff step is a different pitch in each clef
+        # Switch the channel to this part's instrument sound ("program").
+        self.synth.program_select(CHANNEL, self.soundfont_id, 0, part.instrument.program)
         self.index = 0
         # perf_counter() is a high-precision clock, in seconds. Only the
         # differences between its readings matter.

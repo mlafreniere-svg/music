@@ -5,7 +5,12 @@ Each `assert` must be true; if one isn't, pytest reports that test as
 failed and shows the values involved.
 """
 
-from model import EIGHTH, HALF, QUARTER, WHOLE, Note, Part, step_to_midi
+import pytest
+
+from model import (
+    EIGHTH, HALF, INSTRUMENTS, PIANO, QUARTER, WHOLE,
+    Note, Part, Score, find_instrument, step_to_midi,
+)
 
 
 # --- Pitch ---------------------------------------------------------------
@@ -95,3 +100,43 @@ def test_measure_ends_when_a_note_overflows():
     # (Ties will handle this properly later; see projectplan.md.)
     part = Part([Note(0), Note(0), Note(0), Note(0, HALF)])
     assert part.measure_ends() == [3]
+
+
+# --- Instruments and scores ----------------------------------------------
+
+def test_parts_default_to_piano_in_treble():
+    part = Part()
+    assert part.instrument == PIANO
+    assert part.clef == "treble"
+
+
+def test_part_clef_comes_from_instrument():
+    cello = Part(instrument=find_instrument("Cello"))
+    assert cello.clef == "bass"
+    # The bottom line of the bass staff is G2.
+    cello.add_note(Note(0))
+    assert cello.notes[0].midi_pitch(cello.clef) == 43
+
+
+def test_instrument_list_is_sensible():
+    names = [i.name for i in INSTRUMENTS]
+    assert len(names) == len(set(names))  # no duplicate names (a set drops repeats)
+    for instrument in INSTRUMENTS:
+        assert 0 <= instrument.program <= 127
+        assert instrument.clef in ("treble", "bass")
+
+
+def test_find_instrument_unknown_name():
+    # pytest.raises checks that the code inside *does* raise this error.
+    with pytest.raises(ValueError):
+        find_instrument("Kazoo")
+
+
+def test_score_add_and_remove_parts():
+    score = Score()
+    violin = score.add_part(find_instrument("Violin"))
+    score.add_part(find_instrument("Cello"))
+    assert [p.instrument.name for p in score.parts] == ["Violin", "Cello"]
+    assert violin is score.parts[0]  # add_part returns the very part it added
+    score.remove_part(0)
+    assert [p.instrument.name for p in score.parts] == ["Cello"]
