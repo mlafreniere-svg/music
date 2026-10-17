@@ -148,6 +148,14 @@ class StaffWidget(QWidget):
         self.setMinimumHeight(round(step_to_y(LOWEST_STEP - 4)))
         self.update_width()
 
+        # Dragging: which note is being dragged (None = no drag) and where it started.
+        self.drag_index = None
+        self.drag_start_step = None
+        # Normally Qt only reports mouse movement while a button is held down.
+        # Tracking reports it all the time, so we can change the pointer when
+        # it's over a note.
+        self.setMouseTracking(True)
+
     def update_width(self):
         """Make the staff wide enough for all its notes plus room for more.
 
@@ -188,6 +196,27 @@ class StaffWidget(QWidget):
             return index
         return None
 
+    def note_head_at(self, pos):
+        """The index of the note whose head is under this point, or None.
+
+        Rests don't count, since they can't be dragged to a new pitch.
+        """
+        index = self.note_index_at(pos.x())
+        if index is None:
+            return None
+        note = self.part.notes[index]
+        if note.is_rest:
+            return None
+        # abs() is the distance ignoring direction: abs(-3) is 3.
+        close_in_x = abs(pos.x() - self.note_x(index)) <= NOTE_HEAD_WIDTH * 0.75
+        close_in_y = abs(pos.y() - step_to_y(note.step)) <= NOTE_HEAD_HEIGHT * 0.75
+        return index if close_in_x and close_in_y else None
+
+    def preview_note(self, note):
+        """Ask to hear this note, if Preview is switched on."""
+        if self.settings.preview and not note.is_rest:
+            self.preview.emit(self.part.instrument.program, note.midi_pitch(self.part.clef))
+
     def delete_last_note(self):
         """Remove the last note and redraw."""
         if self.part.notes:  # only a real change if there was a note to delete
@@ -205,6 +234,15 @@ class StaffWidget(QWidget):
             return
         if event.button() != Qt.LeftButton:
             return
+        # Pressing on a note head grabs it, to drag it to a new pitch.
+        index = self.note_head_at(event.position())
+        if index is not None:
+            self.drag_index = index
+            self.drag_start_step = self.part.notes[index].step
+            self.setCursor(Qt.ClosedHandCursor)
+            self.preview_note(self.part.notes[index])
+            return
+        # Anywhere else: add a new note at the end.
         if self.settings.rest_mode:
             step = None  # a rest has no pitch, so the click's height doesn't matter
         else:
@@ -214,8 +252,31 @@ class StaffWidget(QWidget):
         self.notes_changed()
         # Keep the new note, and the empty space after it, in view.
         self.scroll_to.emit(self.note_x(len(self.part.notes)))
-        if self.settings.preview and not note.is_rest:
-            self.preview.emit(self.part.instrument.program, note.midi_pitch(self.part.clef))
+        self.preview_note(note)
+
+    def mouseMoveEvent(self, event):
+        # Qt calls this whenever the mouse moves over us (thanks to mouse tracking).
+        if self.drag_index is None:
+            # Not dragging: show an open hand over notes that can be grabbed.
+            over_note = self.note_head_at(event.position()) is not None
+            self.setCursor(Qt.OpenHandCursor if over_note else Qt.ArrowCursor)
+            return
+        note = self.part.notes[self.drag_index]
+        new_step = y_to_step(event.position().y())
+        if new_step != note.step:  # only when it crosses into a new line or space
+            note.step = new_step
+            self.update()
+            self.preview_note(note)
+
+    def mouseReleaseEvent(self, event):
+        # Qt calls this when a mouse button is let go: the end of a drag.
+        if self.drag_index is None or event.button() != Qt.LeftButton:
+            return
+        moved = self.part.notes[self.drag_index].step != self.drag_start_step
+        self.drag_index = None
+        self.setCursor(Qt.OpenHandCursor)  # the pointer is still over the note
+        if moved:
+            self.notes_changed()  # a real edit: mark the score as changed
 
     def paintEvent(self, event):
         # Qt calls paintEvent automatically whenever the widget needs to be

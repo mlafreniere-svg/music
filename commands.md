@@ -143,6 +143,7 @@ Keyboard shortcuts inside the app:
 
 A `*` after the name in the title bar means there are unsaved changes.
 | Right-click a note | Delete that note. |
+| Drag a note up/down | Change its pitch (the pointer becomes a hand over a note). |
 
 
 ## Testing (pytest)
