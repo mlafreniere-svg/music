@@ -140,8 +140,11 @@ Keyboard shortcuts inside the app:
 | `Ctrl+S` | Save. The first time, it asks for a file name. |
 | `Ctrl+Shift+S` | Save As: save under a new name. |
 | `Alt+F` | Open the File menu. |
+| `Ctrl+Z` | Undo the last edit (notes, drags, tabs, tempo). Repeat to go further back. |
+| `Ctrl+Y` | Redo what you just undid. |
+| `Alt+E` | Open the Edit menu (it names what Undo/Redo will do, e.g. "Undo Move note"). |
 
-A `*` after the name in the title bar means there are unsaved changes.
+A `*` after the name in the title bar means there are unsaved changes. Undoing back to the saved state removes it.
 | Right-click a note | Delete that note. |
 | Drag a note up/down | Change its pitch (the pointer becomes a hand over a note). |
 

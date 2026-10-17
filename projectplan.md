@@ -65,7 +65,7 @@ Completed milestones are marked with ✅.
 4. ✅ Playback with FluidSynth: Play/Pause/Stop, tempo, moving cursor.
 5. ✅ Instrument tabs (add/remove), auto clef, mute/solo, multiple parts in sync.
 6. ✅ Save/load JSON.
-7. Undo/redo, dragging notes, pitch preview, scrolling as measures are added.
+7. ✅ Undo/redo, dragging notes, pitch preview, scrolling as measures are added.
 
 
 

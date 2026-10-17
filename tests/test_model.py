@@ -83,6 +83,21 @@ def test_remove_note_and_remove_last():
     assert part.notes == []
 
 
+def test_insert_note_puts_it_back_in_place():
+    part = Part([Note(0), Note(2)])
+    part.insert_note(1, Note(1))
+    assert [n.step for n in part.notes] == [0, 1, 2]
+
+
+def test_insert_part_puts_it_back_in_place():
+    score = Score()
+    score.add_part(find_instrument("Violin"))
+    score.add_part(find_instrument("Cello"))
+    flute = Part(instrument=find_instrument("Flute"))
+    score.insert_part(1, flute)
+    assert [p.instrument.name for p in score.parts] == ["Violin", "Flute", "Cello"]
+
+
 # --- Measures ------------------------------------------------------------
 
 def test_measure_ends_with_exact_measures():

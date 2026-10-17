@@ -7,7 +7,7 @@ from pathlib import Path
 from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QAction, QActionGroup, QColor, QFont, QFontMetricsF, QKeySequence, QPainter,
-    QPainterPath, QPen,
+    QPainterPath, QPen, QUndoStack,
 )
 from PySide6.QtWidgets import (
     QApplication, QFileDialog, QHBoxLayout, QLabel, QMainWindow, QMenu, QMessageBox,
@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
 from model import (  # our own model.py
     EIGHTH, HALF, INSTRUMENTS, PIANO, QUARTER, WHOLE, Note, Score,
 )
+from edits import AddNote, AddPart, ChangeTempo, MoveNote, RemoveNote, RemovePart
 from player import MAX_PARTS, PAUSED, PLAYING, STOPPED, Player
 from storage import FILE_EXTENSION, display_name, load_score, save_score
 
@@ -128,7 +129,12 @@ class StaffWidget(QWidget):
     already do, and we only add the part that's ours, the drawing.
     """
 
-    changed = Signal()       # sent whenever a note is added or removed
+    # The staff doesn't change the music itself: it *asks*, and the window
+    # turns each request into an undoable command (see edits.py).
+    add_requested = Signal(object)          # a Note to add at the end ("object": any Python value)
+    remove_requested = Signal(int)          # the index of a note to delete
+    move_requested = Signal(int, int, int)  # (index, old step, new step) after a drag
+
     preview = Signal(int, int)  # (instrument program, MIDI pitch): "let me hear this note"
     scroll_to = Signal(float)   # an x position that should be scrolled into view
 
@@ -164,11 +170,10 @@ class StaffWidget(QWidget):
         """
         self.setMinimumWidth(round(self.note_x(len(self.part.notes)) + EMPTY_SPACE_AT_END))
 
-    def notes_changed(self):
-        """After any edit: resize, redraw, and tell the window."""
+    def refresh(self):
+        """After the part's notes change: resize and redraw."""
         self.update_width()
         self.update()  # ask Qt to repaint soon; it will call paintEvent
-        self.changed.emit()  # tell the window there's something new to save
 
     def set_dimmed(self, dimmed):
         """Draw the staff in gray (dimmed=True) or black."""
@@ -217,20 +222,13 @@ class StaffWidget(QWidget):
         if self.settings.preview and not note.is_rest:
             self.preview.emit(self.part.instrument.program, note.midi_pitch(self.part.clef))
 
-    def delete_last_note(self):
-        """Remove the last note and redraw."""
-        if self.part.notes:  # only a real change if there was a note to delete
-            self.part.remove_last()
-            self.notes_changed()
-
     def mousePressEvent(self, event):
         # Qt calls this automatically whenever the mouse is clicked on us.
         if event.button() == Qt.RightButton:
             # Right-click deletes the note in that column, if there is one.
             index = self.note_index_at(event.position().x())
             if index is not None:  # "is not None", because index 0 is a real note
-                self.part.remove_note(index)
-                self.notes_changed()
+                self.remove_requested.emit(index)
             return
         if event.button() != Qt.LeftButton:
             return
@@ -248,10 +246,7 @@ class StaffWidget(QWidget):
         else:
             step = y_to_step(event.position().y())
         note = Note(step, self.settings.duration)
-        self.part.add_note(note)
-        self.notes_changed()
-        # Keep the new note, and the empty space after it, in view.
-        self.scroll_to.emit(self.note_x(len(self.part.notes)))
+        self.add_requested.emit(note)
         self.preview_note(note)
 
     def mouseMoveEvent(self, event):
@@ -261,6 +256,8 @@ class StaffWidget(QWidget):
             over_note = self.note_head_at(event.position()) is not None
             self.setCursor(Qt.OpenHandCursor if over_note else Qt.ArrowCursor)
             return
+        # While dragging, the note follows the mouse right away, so you can see
+        # and hear where it's going. The undoable edit is made on release.
         note = self.part.notes[self.drag_index]
         new_step = y_to_step(event.position().y())
         if new_step != note.step:  # only when it crosses into a new line or space
@@ -272,11 +269,12 @@ class StaffWidget(QWidget):
         # Qt calls this when a mouse button is let go: the end of a drag.
         if self.drag_index is None or event.button() != Qt.LeftButton:
             return
-        moved = self.part.notes[self.drag_index].step != self.drag_start_step
+        index = self.drag_index
+        new_step = self.part.notes[index].step
         self.drag_index = None
         self.setCursor(Qt.OpenHandCursor)  # the pointer is still over the note
-        if moved:
-            self.notes_changed()  # a real edit: mark the score as changed
+        if new_step != self.drag_start_step:  # only a real move becomes an undo step
+            self.move_requested.emit(index, self.drag_start_step, new_step)
 
     def paintEvent(self, event):
         # Qt calls paintEvent automatically whenever the widget needs to be
@@ -459,6 +457,12 @@ class MainWindow(QMainWindow):
         self.score = Score()            # all the music: one Part per tab
         self.settings = EditSettings()  # shared by every tab's staff
 
+        # Every edit goes onto this stack as a command (see edits.py), so it
+        # can be undone. The stack also knows whether we're back at the last
+        # saved state ("clean"), which is what the title bar's * shows.
+        self.undo_stack = QUndoStack(self)
+        self.undo_stack.cleanChanged.connect(self.update_title)
+
         # The tabs. Tab number i always shows score.parts[i]: tabs can't be
         # dragged into a new order, so the two lists stay lined up.
         self.tabs = QTabWidget()
@@ -573,7 +577,8 @@ class MainWindow(QMainWindow):
         self.update_transport_buttons(self.player.state)
 
         self.build_file_menu()
-        self.set_dirty(False)  # a brand-new score has nothing to save yet
+        self.build_edit_menu()
+        self.update_title()
 
     # --- Tabs ---------------------------------------------------------------
 
@@ -595,11 +600,21 @@ class MainWindow(QMainWindow):
         part = self.score.add_part(instrument)
         self.show_part(part)
 
-    def show_part(self, part):
-        """Make a tab for a part that's already in the score."""
+    def show_part(self, part, index=None):
+        """Make a tab for a part that's already in the score.
+
+        The tab goes at position `index`, or at the end if index is None.
+        """
         staff = StaffWidget(part, self.settings)
-        staff.changed.connect(self.mark_dirty)  # any edit means there's something to save
         staff.preview.connect(self.player.preview)  # the signal's (program, pitch) go straight through
+        # Turn the staff's requests into undoable commands. "part=part" stores
+        # this tab's part inside each lambda (see make_mute_solo).
+        staff.add_requested.connect(
+            lambda note, part=part: self.undo_stack.push(AddNote(self, part, note)))
+        staff.remove_requested.connect(
+            lambda i, part=part: self.undo_stack.push(RemoveNote(self, part, i)))
+        staff.move_requested.connect(
+            lambda i, old, new, part=part: self.undo_stack.push(MoveNote(self, part, i, old, new)))
 
         # Put the staff in a scroll area, so long pieces can scroll sideways.
         area = QScrollArea()
@@ -608,7 +623,11 @@ class MainWindow(QMainWindow):
         area.setFocusPolicy(Qt.NoFocus)  # keep Space for play/pause
         staff.scroll_to.connect(lambda x, area=area: self.scroll_into_view(area, x))
 
-        index = self.tabs.addTab(area, self.unused_tab_label(part.instrument.name))
+        label = self.unused_tab_label(part.instrument.name)
+        if index is None:
+            index = self.tabs.addTab(area, label)
+        else:
+            self.tabs.insertTab(index, area, label)
         self.tabs.tabBar().setTabButton(index, QTabBar.LeftSide, self.make_mute_solo(part))
         self.tabs.setCurrentIndex(index)  # switch to the new tab
         self.refresh_audibility()  # a new part may be silent if another tab is soloed
@@ -626,6 +645,9 @@ class MainWindow(QMainWindow):
         for button in (mute, solo):
             button.setCheckable(True)
             button.setFocusPolicy(Qt.NoFocus)  # keep Space for play/pause
+        # Start out matching the part (a tab brought back by undo keeps its Mute/Solo).
+        mute.setChecked(part.muted)
+        solo.setChecked(part.soloed)
 
         # Each button needs to know which part it controls. A lambda is a
         # tiny function written in place; "part=part" stores this tab's part
@@ -685,24 +707,51 @@ class MainWindow(QMainWindow):
             # The status bar is the strip along the bottom of the window.
             self.statusBar().showMessage(f"At most {MAX_PARTS} instruments.", 3000)
             return
-        self.add_tab(action.data())
-        self.mark_dirty()
+        self.undo_stack.push(AddPart(self, self.score, action.data()))
 
     def on_close_tab(self, index):
         """Slot: the x on a tab was clicked."""
         if self.tabs.count() == 1:
             self.statusBar().showMessage("A score needs at least one instrument.", 3000)
             return
-        if self.player.state != STOPPED:
-            # Removing a part renumbers the ones after it, which would mix up
-            # the player's part numbers. Stopping first keeps things simple.
-            self.player.stop()
+        self.undo_stack.push(RemovePart(self, self.score, index))
+
+    # --- What the undoable commands call (the "view" in edits.py) -------------
+
+    def part_changed(self, part, index):
+        """A part's notes changed: show its tab, redraw it, and show note `index`."""
+        for tab_index, staff in enumerate(self.all_staffs()):
+            if staff.part is part:  # "is": this exact Part object
+                self.tabs.setCurrentIndex(tab_index)  # undo shows you what it undid
+                staff.refresh()
+                staff.scroll_to.emit(staff.note_x(max(index, 0)))
+                return
+
+    def insert_part(self, index, part):
+        """Add a part to the score with its own tab, at position `index`."""
+        self.stop_if_playing()
+        self.score.insert_part(index, part)
+        self.show_part(part, index)
+
+    def remove_part_at(self, index):
+        """Remove the part (and its tab) at position `index`."""
+        self.stop_if_playing()
         area = self.tabs.widget(index)
         self.tabs.removeTab(index)
         self.score.remove_part(index)  # keep the score lined up with the tabs
         area.deleteLater()  # free the scroll area (and the staff inside it)
         self.refresh_audibility()  # closing a soloed tab un-silences the others
-        self.mark_dirty()
+
+    def set_tempo(self, bpm):
+        """Change the tempo and move the slider to match."""
+        self.score.tempo_bpm = bpm  # set this first, so on_tempo_changed sees no edit
+        self.tempo_slider.setValue(bpm)
+
+    def stop_if_playing(self):
+        # Adding or removing a part renumbers the ones after it, which would
+        # mix up the player's part numbers. Stopping first keeps things simple.
+        if self.player.state != STOPPED:
+            self.player.stop()
 
     # --- Editing ------------------------------------------------------------
 
@@ -720,7 +769,9 @@ class MainWindow(QMainWindow):
 
     def on_delete_last(self):
         """Slot: delete the last note in the open tab."""
-        self.current_staff().delete_last_note()
+        part = self.current_staff().part
+        if part.notes:  # nothing to do (and nothing to undo) on an empty staff
+            self.undo_stack.push(RemoveNote(self, part, len(part.notes) - 1))
 
     # --- Playback -----------------------------------------------------------
 
@@ -757,9 +808,10 @@ class MainWindow(QMainWindow):
 
     def on_tempo_changed(self, bpm):
         """Slot: the tempo slider moved."""
-        if bpm != self.score.tempo_bpm:  # loading a file sets the slider too; that's no edit
-            self.score.tempo_bpm = bpm  # the player reads it at every note
-            self.mark_dirty()
+        # When the code moves the slider (loading a file, undo), the score
+        # already has this tempo, so it's not a new edit.
+        if bpm != self.score.tempo_bpm:
+            self.undo_stack.push(ChangeTempo(self, self.score.tempo_bpm, bpm))
         self.tempo_label.setText(f" {bpm} BPM ")
 
     # --- Files --------------------------------------------------------------
@@ -781,16 +833,26 @@ class MainWindow(QMainWindow):
         menu.addSeparator()
         menu.addAction("E&xit").triggered.connect(self.close)  # close() runs closeEvent
 
-    def mark_dirty(self):
-        """Slot: the score changed since it was last saved."""
-        self.set_dirty(True)
+    def build_edit_menu(self):
+        """The Edit menu: Undo and Redo."""
+        menu = self.menuBar().addMenu("&Edit")
+        # The undo stack makes these actions for us. Their text follows the
+        # stack ("Undo Add note", "Redo Move note"), and they gray out
+        # by themselves when there's nothing to undo or redo.
+        self.undo_action = self.undo_stack.createUndoAction(self, "&Undo")
+        self.undo_action.setShortcut(QKeySequence.Undo)  # Ctrl+Z
+        self.redo_action = self.undo_stack.createRedoAction(self, "&Redo")
+        self.redo_action.setShortcut(QKeySequence.Redo)  # Ctrl+Y
+        menu.addAction(self.undo_action)
+        menu.addAction(self.redo_action)
 
-    def set_dirty(self, dirty):
-        """Remember whether there are unsaved changes, and show it in the title bar."""
+    def update_title(self):
+        """Show the file name, plus * if there are unsaved changes."""
         name = display_name(self.file_path) if self.file_path else "Untitled"
         # Qt shows "[*]" as "*" when the window is marked modified, and hides it otherwise.
         self.setWindowTitle(f"{name}[*] - Music Staff")
-        self.setWindowModified(dirty)
+        # "Clean" means the undo stack is exactly where it was at the last save.
+        self.setWindowModified(not self.undo_stack.isClean())
 
     def show_score(self, score, path):
         """Replace everything on screen with this score (after New or Open)."""
@@ -808,7 +870,10 @@ class MainWindow(QMainWindow):
         self.tabs.setCurrentIndex(0)
         self.tempo_slider.setValue(score.tempo_bpm)
         self.on_tempo_changed(score.tempo_bpm)  # updates the label even if the value didn't change
-        self.set_dirty(False)
+        # A different score: the old undo history no longer applies. clear()
+        # also marks the stack clean, so there's nothing unsaved.
+        self.undo_stack.clear()
+        self.update_title()
 
     def maybe_save(self):
         """Before throwing the current score away: offer to save it.
@@ -872,7 +937,8 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Couldn't save file", f"{path}\n\n{error}")
             return False
         self.file_path = path
-        self.set_dirty(False)
+        self.undo_stack.setClean()  # "this is the saved state"; undoing past it brings the * back
+        self.update_title()         # the file name may have changed (Save As)
         self.statusBar().showMessage(f"Saved {path}", 3000)
         return True
 

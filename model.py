@@ -138,6 +138,13 @@ class Part:
         """Add a note (or rest) to the end of the part."""
         self.notes.append(note)
 
+    def insert_note(self, index, note):
+        """Put a note at this position; the notes from there on move right.
+
+        Undo uses this to put a deleted note back exactly where it was.
+        """
+        self.notes.insert(index, note)
+
     def remove_note(self, index):
         """Remove the note at this position (0 = first). Later notes move left."""
         del self.notes[index]
@@ -221,6 +228,10 @@ class Score:
         part = Part(instrument=instrument)  # a keyword argument: skip notes, set instrument
         self.parts.append(part)
         return part
+
+    def insert_part(self, index, part):
+        """Put a part at this position (undo uses this to restore a closed tab)."""
+        self.parts.insert(index, part)
 
     def remove_part(self, index):
         """Remove the part at this position (0 = first)."""
