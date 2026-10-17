@@ -37,7 +37,40 @@ def test_file_is_readable_json(tmp_path):
     data = json.loads(path.read_text(encoding="utf-8"))
     assert data["tempo_bpm"] == 132
     assert data["parts"][0]["instrument"] == "Violin"
-    assert data["parts"][0]["notes"][1] == {"step": None, "duration": 2.0}  # the rest
+    assert data["parts"][0]["notes"][1] == {"step": None, "duration": 2.0, "alter": 0}  # the rest
+
+
+def test_sharps_flats_and_key_are_saved(tmp_path):
+    score = make_duet()
+    score.key = -2                    # B-flat major
+    score.parts[0].notes[0].alter = 1  # a sharp
+    path = tmp_path / "keys.music.json"
+    save_score(score, path)
+    loaded = load_score(path)
+    assert loaded.key == -2
+    assert loaded.parts[0].notes[0].alter == 1
+    assert loaded == score
+
+
+def test_version_1_files_still_load():
+    # A file saved before sharps and flats existed: no "key", no "alter".
+    old = {
+        "format": "music-staff",
+        "version": 1,
+        "tempo_bpm": 90,
+        "parts": [{"instrument": "Flute", "notes": [{"step": 3, "duration": 1.0}]}],
+    }
+    score = score_from_dict(old)
+    assert score.key == 0
+    assert score.parts[0].notes[0].alter == 0
+    assert score.parts[0].notes[0].step == 3
+
+
+def test_future_versions_are_rejected():
+    data = score_to_dict(make_duet())
+    data["version"] = 99
+    with pytest.raises(ValueError):
+        score_from_dict(data)
 
 
 def test_mute_and_solo_are_not_saved():

@@ -8,8 +8,9 @@ failed and shows the values involved.
 import pytest
 
 from model import (
-    EIGHTH, HALF, INSTRUMENTS, PIANO, QUARTER, WHOLE,
-    Note, Part, Score, clef_change_shift, find_instrument, step_to_midi,
+    EIGHTH, FLAT, HALF, INSTRUMENTS, KEY_NAMES, NATURAL, PIANO, QUARTER, SHARP, WHOLE,
+    Note, Part, Score, clef_change_shift, find_instrument, key_alter, key_name, letter_of,
+    step_to_midi,
 )
 
 
@@ -115,6 +116,86 @@ def test_measure_ends_when_a_note_overflows():
     # (Ties will handle this properly later; see projectplan.md.)
     part = Part([Note(0), Note(0), Note(0), Note(0, HALF)])
     assert part.measure_ends() == [3]
+
+
+# --- Sharps, flats, and key signatures -----------------------------------
+
+F4 = 1  # treble-clef step of F4 (the bottom space)
+F5 = 8  # treble-clef step of F5 (the top line)
+B4 = 4  # the middle line
+
+
+def test_accidentals_change_the_pitch():
+    assert Note(F4).midi_pitch() == 65
+    assert Note(F4, alter=SHARP).midi_pitch() == 66
+    assert Note(B4, alter=FLAT).midi_pitch() == 70
+
+
+def test_letter_of():
+    assert letter_of(F4, "treble") == 3  # F
+    assert letter_of(0, "bass") == 4     # G (bass bottom line)
+
+
+def test_key_alter():
+    assert key_alter(3, 1) == SHARP     # F in G major (1 sharp)
+    assert key_alter(0, 1) == NATURAL   # C in G major
+    assert key_alter(6, -1) == FLAT     # B in F major (1 flat)
+    assert key_alter(2, -2) == FLAT     # E in B-flat major (2 flats)
+    assert key_alter(3, 0) == NATURAL   # nothing in C major
+
+
+def test_key_names():
+    assert key_name(0) == "C major / A minor (no ♯ or ♭)"
+    assert key_name(1) == "G major / E minor (1♯)"
+    assert key_name(-2) == "B♭ major / G minor (2♭)"
+    assert len(KEY_NAMES) == 15  # 7 flats ... 7 sharps
+
+
+def test_each_key_alters_exactly_its_count_of_letters():
+    for key in range(-7, 8):
+        altered = [letter for letter in range(7) if key_alter(letter, key) != NATURAL]
+        assert len(altered) == abs(key)
+
+
+def signs(notes, key=0, instrument=PIANO):
+    return Part(notes, instrument).accidental_signs(key)
+
+
+def test_naturals_in_c_major_show_no_signs():
+    assert signs([Note(0), Note(F4), Note(B4)]) == [None, None, None]
+
+
+def test_a_sharp_carries_through_the_measure():
+    notes = [Note(F4, alter=SHARP), Note(F4, alter=SHARP), Note(F4), Note(0)]
+    # 1st F#: sign. 2nd F#: already sharp in this measure, no sign.
+    # Then F natural: needs a natural sign to cancel the sharp.
+    assert signs(notes) == [SHARP, None, NATURAL, None]
+
+
+def test_bar_line_resets_accidentals():
+    measure_1 = [Note(F4, alter=SHARP), Note(0), Note(0), Note(0)]
+    measure_2 = [Note(F4, alter=SHARP)]
+    assert signs(measure_1 + measure_2) == [SHARP, None, None, None, SHARP]
+
+
+def test_accidental_only_affects_its_own_line_or_space():
+    # F#4 doesn't change F5 (a different octave, on a different line).
+    assert signs([Note(F4, alter=SHARP), Note(F5)]) == [SHARP, None]
+
+
+def test_key_signature_means_no_sign_needed():
+    # G major: F is already sharp, so F# needs no sign, and plain F needs a natural.
+    assert signs([Note(F4, alter=SHARP), Note(F5)], key=1) == [None, NATURAL]
+
+
+def test_rests_never_get_signs():
+    assert signs([Note(None), Note(F4, alter=SHARP)]) == [None, SHARP]
+
+
+def test_overflowing_note_still_resets_at_the_next_measure():
+    # 3 quarters + a half note crosses the bar line (beat 5); the next F# is in measure 2.
+    notes = [Note(F4, alter=SHARP), Note(0), Note(0), Note(0, HALF), Note(F4, alter=SHARP)]
+    assert signs(notes) == [SHARP, None, None, None, SHARP]
 
 
 # --- Changing clef -------------------------------------------------------

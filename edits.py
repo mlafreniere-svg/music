@@ -15,6 +15,7 @@ can show its change on screen:
     view.insert_part(index, part)   add a tab for this part at `index`
     view.remove_part_at(index)      remove the tab (and part) at `index`
     view.set_tempo(bpm)             change the tempo and move the slider
+    view.set_key(key)               change the key signature and the Key dropdown
 """
 
 from PySide6.QtGui import QUndoCommand
@@ -81,6 +82,27 @@ class MoveNote(QUndoCommand):
         self.view.part_changed(self.part, self.index)
 
 
+class ChangeAlter(QUndoCommand):
+    """Raise or lower a note by a half step (♭ → ♮ → ♯ or back)."""
+
+    def __init__(self, view, part, index, new_alter):
+        old_alter = part.notes[index].alter
+        super().__init__("Raise note" if new_alter > old_alter else "Lower note")
+        self.view = view
+        self.part = part
+        self.index = index
+        self.old_alter = old_alter
+        self.new_alter = new_alter
+
+    def redo(self):
+        self.part.notes[self.index].alter = self.new_alter
+        self.view.part_changed(self.part, self.index)
+
+    def undo(self):
+        self.part.notes[self.index].alter = self.old_alter
+        self.view.part_changed(self.part, self.index)
+
+
 class ChangeInstrument(QUndoCommand):
     """Switch a part to another instrument.
 
@@ -143,6 +165,22 @@ class RemovePart(QUndoCommand):
 
     def undo(self):
         self.view.insert_part(self.index, self.part)
+
+
+class ChangeKey(QUndoCommand):
+    """Change the key signature. Notes keep their pitches; only signs change."""
+
+    def __init__(self, view, old_key, new_key):
+        super().__init__("Change key")
+        self.view = view
+        self.old_key = old_key
+        self.new_key = new_key
+
+    def redo(self):
+        self.view.set_key(self.new_key)
+
+    def undo(self):
+        self.view.set_key(self.old_key)
 
 
 class ChangeTempo(QUndoCommand):

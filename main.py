@@ -10,15 +10,17 @@ from PySide6.QtGui import (
     QPainterPath, QPen, QUndoStack,
 )
 from PySide6.QtWidgets import (
-    QApplication, QFileDialog, QHBoxLayout, QLabel, QMainWindow, QMenu, QMessageBox,
+    QApplication, QComboBox, QFileDialog, QHBoxLayout, QLabel, QMainWindow, QMenu, QMessageBox,
     QScrollArea, QSlider, QTabBar, QTabWidget, QToolButton, QWidget,
 )
 
 from model import (  # our own model.py
-    EIGHTH, HALF, INSTRUMENTS, PIANO, QUARTER, WHOLE, Note, Score,
+    EIGHTH, FLAT, HALF, INSTRUMENTS, KEY_NAMES, NATURAL, PIANO, QUARTER, SHARP, WHOLE,
+    Note, Score, key_alter, key_name, letter_of,
 )
 from edits import (
-    AddNote, AddPart, ChangeInstrument, ChangeTempo, MoveNote, RemoveNote, RemovePart,
+    AddNote, AddPart, ChangeAlter, ChangeInstrument, ChangeKey, ChangeTempo, MoveNote,
+    RemoveNote, RemovePart,
 )
 from player import MAX_PARTS, PAUSED, PLAYING, STOPPED, Player
 from storage import FILE_EXTENSION, display_name, load_score, save_score
@@ -42,7 +44,7 @@ NOTE_HEAD_HEIGHT = LINE_SPACING        # exactly fills one space between lines
 STEM_LENGTH = LINE_SPACING * 3.5
 
 # Horizontal layout: notes are placed left to right, one after another.
-FIRST_NOTE_X = MARGIN + 75  # leaves room at the start for the clef
+FIRST_NOTE_X = MARGIN + 90  # leaves room at the start for the clef (and a first ♯ or ♭)
 NOTE_SPACING = 40           # distance from one note to the next
 EMPTY_SPACE_AT_END = NOTE_SPACING * 8 + MARGIN  # room after the last note to click into
 
@@ -96,6 +98,30 @@ CLEF_FONT = "Segoe UI Symbol"
 CLEF_TOP_STEP = {"treble": 10.6, "bass": 8.7}
 CLEF_BOTTOM_STEP = {"treble": -3.0, "bass": 1.9}
 
+# Accidental signs, from the same font: sharp, flat, natural.
+ACCIDENTAL_SYMBOLS = {SHARP: "♯", FLAT: "♭", NATURAL: "♮"}
+# How tall each sign is drawn, in staff spaces (as in printed music).
+ACCIDENTAL_HEIGHT = {SHARP: 2.6, FLAT: 2.3, NATURAL: 2.6}
+
+# Key signatures: the staff step of each sharp or flat, in the order they're
+# added (sharps F C G D A E B, flats B E A D G C F). Bass clef uses the same
+# zig-zag pattern, 2 steps lower.
+KEY_SHARP_STEPS = {"treble": [8, 5, 9, 6, 3, 7, 4], "bass": [6, 3, 7, 4, 1, 5, 2]}
+KEY_FLAT_STEPS = {"treble": [4, 7, 3, 6, 2, 5, 1], "bass": [2, 5, 1, 4, 0, 3, -1]}
+KEY_GAP = 6                            # space between the clef and the key signature
+KEY_SIGN_SPACING = LINE_SPACING * 1.25  # distance between the key's signs (a sharp is ~1 space wide)
+# After the key signature: half a note head + an accidental + small gaps.
+ROOM_BEFORE_FIRST_NOTE = NOTE_HEAD_WIDTH / 2 + LINE_SPACING * 1.6
+
+# The accidental buttons: (button text, tooltip, alter, keyboard shortcut).
+# alter None means "whatever the key signature says" (in G major, F -> F♯).
+ACCIDENTAL_CHOICES = [
+    ("Key", "Follow the key signature", None, "K"),
+    ("♮", "Natural", NATURAL, "N"),
+    ("♯", "Sharp", SHARP, "S"),
+    ("♭", "Flat", FLAT, "F"),
+]
+
 MIN_TEMPO = 40   # beats per minute
 MAX_TEMPO = 200
 
@@ -111,6 +137,8 @@ class EditSettings:
     duration: float = QUARTER
     rest_mode: bool = False  # when True, clicks add rests instead of notes
     preview: bool = True     # when True, you hear each note as you place it
+    # Sharp, flat, or natural for the next note; None = follow the key signature.
+    alter: int | None = None
 
 
 def step_to_y(step):
@@ -152,6 +180,8 @@ class StaffWidget(QWidget):
         self.playing_index = None
         # The color everything is drawn in; gray when Mute/Solo silences this part.
         self.ink = INK
+        # The score's key signature (+ sharps / - flats); the window keeps it up to date.
+        self.key = 0
         # Tall enough for ledger-line notes and the playback cursor.
         self.setMinimumHeight(round(step_to_y(LOWEST_STEP - 4)))
         self.update_width()
@@ -159,6 +189,8 @@ class StaffWidget(QWidget):
         # Dragging: which note is being dragged (None = no drag) and where it started.
         self.drag_index = None
         self.drag_start_step = None
+        # The note the mouse is over right now (None = none), for the + / - keys.
+        self.hover_index = None
         # Normally Qt only reports mouse movement while a button is held down.
         # Tracking reports it all the time, so we can change the pointer when
         # it's over a note.
@@ -177,6 +209,11 @@ class StaffWidget(QWidget):
         self.update_width()
         self.update()  # ask Qt to repaint soon; it will call paintEvent
 
+    def set_key(self, key):
+        """Use a new key signature: it changes the signs and where notes start."""
+        self.key = key
+        self.refresh()
+
     def set_dimmed(self, dimmed):
         """Draw the staff in gray (dimmed=True) or black."""
         self.ink = DIMMED_INK if dimmed else INK
@@ -189,16 +226,21 @@ class StaffWidget(QWidget):
         if index is not None:
             self.scroll_to.emit(self.note_x(index))  # keep the cursor in view
 
+    def first_note_x(self):
+        """Where the first note goes: after the clef and the key signature,
+        leaving room for a ♯, ♭ or ♮ in front of it."""
+        return max(FIRST_NOTE_X, self.key_signature_right() + ROOM_BEFORE_FIRST_NOTE)
+
     def note_x(self, index):
         """The x position of the note at this place in the list (0 = first)."""
-        return FIRST_NOTE_X + index * NOTE_SPACING
+        return self.first_note_x() + index * NOTE_SPACING
 
     def note_index_at(self, x):
         """The reverse of note_x: which note is at this x position?
 
         Returns the note's index, or None if there's no note there.
         """
-        index = round((x - FIRST_NOTE_X) / NOTE_SPACING)
+        index = round((x - self.first_note_x()) / NOTE_SPACING)
         if 0 <= index < len(self.part.notes):
             return index
         return None
@@ -247,16 +289,24 @@ class StaffWidget(QWidget):
             step = None  # a rest has no pitch, so the click's height doesn't matter
         else:
             step = y_to_step(event.position().y())
-        note = Note(step, self.settings.duration)
+        if step is None:
+            alter = NATURAL  # rests have no accidental
+        elif self.settings.alter is None:
+            # Follow the key: e.g. in G major an F becomes F♯.
+            alter = key_alter(letter_of(step, self.part.clef), self.key)
+        else:
+            alter = self.settings.alter
+        note = Note(step, self.settings.duration, alter)
         self.add_requested.emit(note)
         self.preview_note(note)
 
     def mouseMoveEvent(self, event):
         # Qt calls this whenever the mouse moves over us (thanks to mouse tracking).
         if self.drag_index is None:
-            # Not dragging: show an open hand over notes that can be grabbed.
-            over_note = self.note_head_at(event.position()) is not None
-            self.setCursor(Qt.OpenHandCursor if over_note else Qt.ArrowCursor)
+            # Not dragging: remember which note we're over, and show an open
+            # hand over notes that can be grabbed.
+            self.hover_index = self.note_head_at(event.position())
+            self.setCursor(Qt.OpenHandCursor if self.hover_index is not None else Qt.ArrowCursor)
             return
         # While dragging, the note follows the mouse right away, so you can see
         # and hear where it's going. The undoable edit is made on release.
@@ -266,6 +316,20 @@ class StaffWidget(QWidget):
             note.step = new_step
             self.update()
             self.preview_note(note)
+
+    def leaveEvent(self, event):
+        # Qt calls this when the mouse leaves the widget.
+        self.hover_index = None
+
+    def hovered_note_index(self):
+        """The index of the note under the mouse, or None.
+
+        Checked against the current notes, since an undo may have removed
+        the note the mouse was last over.
+        """
+        if self.hover_index is not None and self.hover_index < len(self.part.notes):
+            return self.hover_index
+        return None
 
     def mouseReleaseEvent(self, event):
         # Qt calls this when a mouse button is let go: the end of a drag.
@@ -300,12 +364,17 @@ class StaffWidget(QWidget):
             y = step_to_y(step)
             painter.drawLine(QPointF(MARGIN, y), QPointF(right_edge, y))
         self.draw_clef(painter)
+        self.draw_key_signature(painter)
 
         # Draw every note. The whole picture is redrawn from self.part each
         # time, so the model is the "truth" and the picture just shows it.
         # enumerate gives each item along with its position: (0, first), (1, second), ...
+        # The model decides which ♯ ♭ ♮ signs are needed (standard notation rule).
+        signs = self.part.accidental_signs(self.key)
         for index, note in enumerate(self.part.notes):
             self.draw_note(painter, self.note_x(index), note)
+            if signs[index] is not None:
+                self.draw_accidental(painter, self.note_x(index), note.step, signs[index])
 
         # Bar lines: the model says where measures end; we draw a line
         # halfway between that note and the next one.
@@ -314,8 +383,12 @@ class StaffWidget(QWidget):
             x = self.note_x(index) + NOTE_SPACING / 2
             painter.drawLine(QPointF(x, step_to_y(TOP_LINE_STEP)), QPointF(x, step_to_y(0)))
 
-    def draw_clef(self, painter):
-        """Draw the part's clef symbol at the start of the staff."""
+    def clef_layout(self):
+        """Work out the clef's font, where to draw it, and where it ends.
+
+        Returns (font, position, right edge). Both drawing the clef and
+        placing the key signature after it use this, so they always agree.
+        """
         clef = self.part.clef
         symbol = CLEF_SYMBOLS[clef]
         top = step_to_y(CLEF_TOP_STEP[clef])
@@ -332,9 +405,56 @@ class StaffWidget(QWidget):
         # drawText places the text's *baseline* (the line letters sit on).
         # outline.top() is how far the symbol reaches above its baseline
         # (a negative number), so this puts the symbol's top exactly at `top`.
+        left = MARGIN + 8
+        position = QPointF(left - outline.left(), top - outline.top())
+        return font, position, left + outline.width()
+
+    def draw_clef(self, painter):
+        """Draw the part's clef symbol at the start of the staff."""
+        font, position, _ = self.clef_layout()
         painter.setFont(font)
-        position = QPointF(MARGIN + 8 - outline.left(), top - outline.top())
-        painter.drawText(position, symbol)
+        painter.drawText(position, CLEF_SYMBOLS[self.part.clef])
+
+    def key_signature_right(self):
+        """Where the key signature ends (just after the clef if there's none)."""
+        _, _, clef_right = self.clef_layout()
+        return clef_right + KEY_GAP + abs(self.key) * KEY_SIGN_SPACING
+
+    def draw_accidental(self, painter, x, step, alter):
+        """Draw a ♯, ♭ or ♮ just left of the note head at (x, step)."""
+        self.draw_sign(painter, x - NOTE_HEAD_WIDTH / 2 - 2, step, alter)  # a small gap
+
+    def draw_key_signature(self, painter):
+        """Draw the key's sharps or flats after the clef, in their standard places."""
+        if self.key > 0:
+            steps, alter = KEY_SHARP_STEPS[self.part.clef][:self.key], SHARP
+        else:
+            steps, alter = KEY_FLAT_STEPS[self.part.clef][:-self.key], FLAT
+        _, _, clef_right = self.clef_layout()
+        for i, step in enumerate(steps):
+            # Each sign's right edge, one KEY_SIGN_SPACING further along.
+            self.draw_sign(painter, clef_right + KEY_GAP + (i + 1) * KEY_SIGN_SPACING, step, alter)
+
+    def draw_sign(self, painter, right, step, alter):
+        """Draw a ♯, ♭ or ♮ on a staff step, with its right edge at x = right."""
+        symbol = ACCIDENTAL_SYMBOLS[alter]
+        # Measure at a test size, then scale to the height we want (like draw_clef).
+        font = QFont(CLEF_FONT)
+        font.setPixelSize(100)
+        test_height = QFontMetricsF(font).tightBoundingRect(symbol).height()
+        font.setPixelSize(round(100 * ACCIDENTAL_HEIGHT[alter] * LINE_SPACING / test_height))
+        outline = QFontMetricsF(font).tightBoundingRect(symbol)  # the symbol's exact shape
+        y = step_to_y(step)
+        if alter == FLAT:
+            # A flat's round bowl sits on the note's line or space, so its
+            # bottom goes just below the note's center.
+            baseline = y + LINE_SPACING * 0.5 - outline.bottom()
+        else:
+            # Sharps and naturals are centered on the note.
+            baseline = y - (outline.top() + outline.height() / 2)
+        painter.setFont(font)
+        painter.setPen(QPen(self.ink, 1))
+        painter.drawText(QPointF(right - outline.right(), baseline), symbol)
 
     def draw_note(self, painter, x, note):
         """Draw one note at horizontal position x, shaped by its duration."""
@@ -519,6 +639,20 @@ class MainWindow(QMainWindow):
         self.rest_action.toggled.connect(self.on_rest_toggled)
         toolbar.addAction(self.rest_action)
 
+        # Sharp / flat / natural for new notes: radio buttons, like the durations.
+        toolbar.addSeparator()
+        self.accidental_group = QActionGroup(self)
+        for text, tip, alter, shortcut in ACCIDENTAL_CHOICES:
+            action = QAction(f"{text} ({shortcut})", self)  # e.g. "♯ (S)"
+            action.setToolTip(f"{tip} ({shortcut}): for the next notes you place")
+            action.setCheckable(True)
+            action.setShortcut(shortcut)
+            action.setData(alter)
+            action.setChecked(alter == self.settings.alter)
+            self.accidental_group.addAction(action)
+            toolbar.addAction(action)
+        self.accidental_group.triggered.connect(self.on_accidental_chosen)
+
         toolbar.addSeparator()
         self.delete_last_action = QAction("Delete Last (Backspace)", self)
         self.delete_last_action.setShortcut("Backspace")
@@ -575,6 +709,17 @@ class MainWindow(QMainWindow):
         self.tempo_slider.valueChanged.connect(self.on_tempo_changed)
         self.on_tempo_changed(self.tempo_slider.value())  # show the starting value
 
+        # Key signature: a drop-down list of all 15 keys, 7 flats to 7 sharps.
+        toolbar.addSeparator()
+        toolbar.addWidget(QLabel(" Key "))
+        self.key_box = QComboBox()
+        for key in sorted(KEY_NAMES):  # sorted: -7, -6, ... 0 ... 7
+            self.key_box.addItem(key_name(key), key)  # (text shown, value kept with it)
+        self.key_box.setCurrentIndex(self.key_box.findData(self.score.key))
+        self.key_box.setFocusPolicy(Qt.NoFocus)  # keep Space for play/pause
+        self.key_box.currentIndexChanged.connect(self.on_key_chosen)
+        toolbar.addWidget(self.key_box)
+
         # Keep the buttons and the cursor in step with the player.
         self.player.state_changed.connect(self.update_transport_buttons)
         self.player.note_started.connect(self.on_note_started)
@@ -610,6 +755,7 @@ class MainWindow(QMainWindow):
         The tab goes at position `index`, or at the end if index is None.
         """
         staff = StaffWidget(part, self.settings)
+        staff.set_key(self.score.key)
         staff.preview.connect(self.player.preview)  # the signal's (program, pitch) go straight through
         # Turn the staff's requests into undoable commands. "part=part" stores
         # this tab's part inside each lambda (see make_mute_solo).
@@ -786,6 +932,13 @@ class MainWindow(QMainWindow):
         area.deleteLater()  # free the scroll area (and the staff inside it)
         self.refresh_audibility()  # closing a soloed tab un-silences the others
 
+    def set_key(self, key):
+        """Change the key signature, the Key drop-down, and every staff."""
+        self.score.key = key  # first, so on_key_chosen sees no new edit
+        self.key_box.setCurrentIndex(self.key_box.findData(key))
+        for staff in self.all_staffs():
+            staff.set_key(key)
+
     def set_tempo(self, bpm):
         """Change the tempo and move the slider to match."""
         self.score.tempo_bpm = bpm  # set this first, so on_tempo_changed sees no edit
@@ -802,6 +955,10 @@ class MainWindow(QMainWindow):
     def on_duration_chosen(self, action):
         """Slot: called by Qt when a duration button is chosen."""
         self.settings.duration = action.data()
+
+    def on_accidental_chosen(self, action):
+        """Slot: ♮, ♯ or ♭ was chosen for the next notes."""
+        self.settings.alter = action.data()
 
     def on_rest_toggled(self, checked):
         """Slot: called by Qt when the Rest button is switched on or off."""
@@ -850,6 +1007,12 @@ class MainWindow(QMainWindow):
             for staff in self.all_staffs():
                 staff.set_playing_index(None)  # hide every cursor
 
+    def on_key_chosen(self, index):
+        """Slot: a key was picked in the Key drop-down."""
+        key = self.key_box.itemData(index)
+        if key != self.score.key:  # the code setting the box (undo, open) is no new edit
+            self.undo_stack.push(ChangeKey(self, self.score.key, key))
+
     def on_tempo_changed(self, bpm):
         """Slot: the tempo slider moved."""
         # When the code moves the slider (loading a file, undo), the score
@@ -890,6 +1053,33 @@ class MainWindow(QMainWindow):
         menu.addAction(self.undo_action)
         menu.addAction(self.redo_action)
 
+        # Raise / lower the note under the mouse. Shortcuts on menu actions
+        # work anywhere in the window. On most keyboards "+" is typed as
+        # Shift+=, which Qt reports as "Shift" plus "+", so that combination
+        # is listed too; plain "=" (the same key without Shift) works as well.
+        menu.addSeparator()
+        raise_action = menu.addAction("Raise hovered note a half step")
+        raise_action.setShortcuts([QKeySequence("+"), QKeySequence("Shift++"), QKeySequence("=")])
+        raise_action.triggered.connect(lambda: self.change_hovered_alter(+1))
+        lower_action = menu.addAction("Lower hovered note a half step")
+        lower_action.setShortcut(QKeySequence("-"))
+        lower_action.triggered.connect(lambda: self.change_hovered_alter(-1))
+
+    def change_hovered_alter(self, direction):
+        """Raise (+1) or lower (-1) the note under the mouse by a half step."""
+        staff = self.current_staff()
+        index = staff.hovered_note_index()
+        if index is None:
+            self.statusBar().showMessage("Point at a note, then press + or -.", 3000)
+            return
+        note = staff.part.notes[index]
+        new_alter = note.alter + direction
+        if not FLAT <= new_alter <= SHARP:  # Python allows chained comparisons like this
+            self.statusBar().showMessage("Double sharps and flats aren't supported.", 3000)
+            return
+        self.undo_stack.push(ChangeAlter(self, staff.part, index, new_alter))
+        staff.preview_note(note)  # hear the new pitch
+
     def update_title(self):
         """Show the file name, plus * if there are unsaved changes."""
         name = display_name(self.file_path) if self.file_path else "Untitled"
@@ -914,6 +1104,7 @@ class MainWindow(QMainWindow):
         self.tabs.setCurrentIndex(0)
         self.tempo_slider.setValue(score.tempo_bpm)
         self.on_tempo_changed(score.tempo_bpm)  # updates the label even if the value didn't change
+        self.set_key(score.key)
         # A different score: the old undo history no longer applies. clear()
         # also marks the stack clean, so there's nothing unsaved.
         self.undo_stack.clear()

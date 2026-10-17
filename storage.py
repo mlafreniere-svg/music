@@ -17,7 +17,12 @@ from model import Note, Part, Score, find_instrument
 
 FILE_EXTENSION = ".music.json"
 FORMAT_NAME = "music-staff"  # identifies our files among all JSON files
-FORMAT_VERSION = 1           # bump this if the layout of the file ever changes
+FORMAT_VERSION = 2           # bump this if the layout of the file ever changes
+# Version history:
+#   1  tempo, parts, notes (step + duration)
+#   2  adds each note's "alter" (sharp/flat) and the score's "key" signature.
+#      Version 1 files still load: their notes are natural, in C major.
+READABLE_VERSIONS = (1, 2)
 
 
 def score_to_dict(score):
@@ -26,13 +31,14 @@ def score_to_dict(score):
         "format": FORMAT_NAME,
         "version": FORMAT_VERSION,
         "tempo_bpm": score.tempo_bpm,
+        "key": score.key,
         "parts": [
             {
                 # Save the instrument by name; its program and clef come
                 # from the INSTRUMENTS list when the file is loaded.
                 "instrument": part.instrument.name,
                 "notes": [
-                    {"step": note.step, "duration": note.duration}
+                    {"step": note.step, "duration": note.duration, "alter": note.alter}
                     for note in part.notes
                 ],
                 # Mute/Solo are deliberately not saved: every file opens
@@ -50,14 +56,17 @@ def score_from_dict(data):
     """
     if data.get("format") != FORMAT_NAME:  # .get returns None if the key is missing
         raise ValueError("This isn't a Music Staff file.")
-    if data.get("version") != FORMAT_VERSION:
+    if data.get("version") not in READABLE_VERSIONS:
         raise ValueError(f"Unsupported file version: {data.get('version')}")
 
-    score = Score(tempo_bpm=data["tempo_bpm"])
+    # .get(key, default) gives the default when the key is missing, which is
+    # how version 1 files (no key, no alter) still load.
+    score = Score(tempo_bpm=data["tempo_bpm"], key=data.get("key", 0))
     for part_data in data["parts"]:
         part = Part(instrument=find_instrument(part_data["instrument"]))
         for note_data in part_data["notes"]:
-            part.add_note(Note(note_data["step"], note_data["duration"]))
+            alter = note_data.get("alter", 0)
+            part.add_note(Note(note_data["step"], note_data["duration"], alter))
         score.parts.append(part)
     return score
 
