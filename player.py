@@ -17,9 +17,15 @@ GAIN = 0.6      # master volume, 0-10; above ~1 notes played together can distor
 
 # MIDI has 16 channels, 0-15. Each part gets its own channel so it can have
 # its own instrument sound. Channel 9 is reserved for drums in General MIDI,
-# so we skip it, leaving 15 channels: at most 15 parts.
-CHANNELS = [c for c in range(16) if c != 9]
+# and channel 15 is kept for previews (hearing a note as you place it),
+# leaving 14 channels: at most 14 parts.
+DRUM_CHANNEL = 9
+PREVIEW_CHANNEL = 15
+CHANNELS = [c for c in range(16) if c not in (DRUM_CHANNEL, PREVIEW_CHANNEL)]
 MAX_PARTS = len(CHANNELS)
+
+PREVIEW_SECONDS = 0.4  # how long a preview note sounds
+PREVIEW_VELOCITY = 90  # a little softer than playback
 
 
 # The player is always in exactly one of these states.
@@ -56,6 +62,12 @@ class Player(QObject):
         self.timer.setSingleShot(True)
         self.timer.setTimerType(Qt.PreciseTimer)
         self.timer.timeout.connect(self.play_next_events)
+
+        # A second timer just for ending preview notes.
+        self.preview_timer = QTimer(self)
+        self.preview_timer.setSingleShot(True)
+        self.preview_timer.timeout.connect(self.end_preview)
+        self.preview_pitch = None  # the preview note that's sounding, if any
 
         self.state = STOPPED
         self.score = None          # the score being played (for Mute/Solo)
@@ -184,6 +196,21 @@ class Player(QObject):
                 self.synth.noteoff(channel, pitch)
                 self.sounding.discard((channel, pitch))
 
+    def preview(self, program, pitch):
+        """Play one short note on the preview channel (works while playing, too)."""
+        self.end_preview()  # cut off the previous preview, if it's still sounding
+        self.synth.program_select(PREVIEW_CHANNEL, self.soundfont_id, 0, program)
+        self.synth.noteon(PREVIEW_CHANNEL, pitch, PREVIEW_VELOCITY)
+        self.preview_pitch = pitch
+        self.preview_timer.start(round(PREVIEW_SECONDS * 1000))
+
+    def end_preview(self):
+        """Stop the preview note, if there is one."""
+        if self.preview_pitch is not None:
+            self.synth.noteoff(PREVIEW_CHANNEL, self.preview_pitch)
+            self.preview_pitch = None
+        self.preview_timer.stop()
+
     def release_all(self):
         """Stop every note that is sounding."""
         for channel, pitch in self.sounding:
@@ -193,4 +220,5 @@ class Player(QObject):
     def close(self):
         """Shut the synthesizer down. Call once, when the app exits."""
         self.stop()
+        self.end_preview()
         self.synth.delete()

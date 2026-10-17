@@ -4,14 +4,14 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from PySide6.QtCore import QPointF, QRectF, Qt, Signal
+from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QAction, QActionGroup, QColor, QFont, QFontMetricsF, QKeySequence, QPainter,
     QPainterPath, QPen,
 )
 from PySide6.QtWidgets import (
     QApplication, QFileDialog, QHBoxLayout, QLabel, QMainWindow, QMenu, QMessageBox,
-    QSlider, QTabBar, QTabWidget, QToolButton, QWidget,
+    QScrollArea, QSlider, QTabBar, QTabWidget, QToolButton, QWidget,
 )
 
 from model import (  # our own model.py
@@ -41,6 +41,7 @@ STEM_LENGTH = LINE_SPACING * 3.5
 # Horizontal layout: notes are placed left to right, one after another.
 FIRST_NOTE_X = MARGIN + 75  # leaves room at the start for the clef
 NOTE_SPACING = 40           # distance from one note to the next
+EMPTY_SPACE_AT_END = NOTE_SPACING * 8 + MARGIN  # room after the last note to click into
 
 # Pitches are stored as "staff steps": 0 is the bottom line, 1 the space
 # above it, 2 the next line, and so on (half a LINE_SPACING per step).
@@ -106,6 +107,7 @@ class EditSettings:
 
     duration: float = QUARTER
     rest_mode: bool = False  # when True, clicks add rests instead of notes
+    preview: bool = True     # when True, you hear each note as you place it
 
 
 def step_to_y(step):
@@ -126,7 +128,9 @@ class StaffWidget(QWidget):
     already do, and we only add the part that's ours, the drawing.
     """
 
-    changed = Signal()  # sent whenever a note is added or removed
+    changed = Signal()       # sent whenever a note is added or removed
+    preview = Signal(int, int)  # (instrument program, MIDI pitch): "let me hear this note"
+    scroll_to = Signal(float)   # an x position that should be scrolled into view
 
     def __init__(self, part, settings):
         # __init__ runs once, when the widget is created.
@@ -140,6 +144,23 @@ class StaffWidget(QWidget):
         self.playing_index = None
         # The color everything is drawn in; gray when Mute/Solo silences this part.
         self.ink = INK
+        # Tall enough for ledger-line notes and the playback cursor.
+        self.setMinimumHeight(round(step_to_y(LOWEST_STEP - 4)))
+        self.update_width()
+
+    def update_width(self):
+        """Make the staff wide enough for all its notes plus room for more.
+
+        The staff sits inside a scroll area. When the staff is wider than
+        the window, the scroll area shows a scroll bar.
+        """
+        self.setMinimumWidth(round(self.note_x(len(self.part.notes)) + EMPTY_SPACE_AT_END))
+
+    def notes_changed(self):
+        """After any edit: resize, redraw, and tell the window."""
+        self.update_width()
+        self.update()  # ask Qt to repaint soon; it will call paintEvent
+        self.changed.emit()  # tell the window there's something new to save
 
     def set_dimmed(self, dimmed):
         """Draw the staff in gray (dimmed=True) or black."""
@@ -150,6 +171,8 @@ class StaffWidget(QWidget):
         """Slot: move the playback cursor to this note (None hides it)."""
         self.playing_index = index
         self.update()
+        if index is not None:
+            self.scroll_to.emit(self.note_x(index))  # keep the cursor in view
 
     def note_x(self, index):
         """The x position of the note at this place in the list (0 = first)."""
@@ -169,8 +192,7 @@ class StaffWidget(QWidget):
         """Remove the last note and redraw."""
         if self.part.notes:  # only a real change if there was a note to delete
             self.part.remove_last()
-            self.update()
-            self.changed.emit()
+            self.notes_changed()
 
     def mousePressEvent(self, event):
         # Qt calls this automatically whenever the mouse is clicked on us.
@@ -179,22 +201,21 @@ class StaffWidget(QWidget):
             index = self.note_index_at(event.position().x())
             if index is not None:  # "is not None", because index 0 is a real note
                 self.part.remove_note(index)
-                self.update()
-                self.changed.emit()
+                self.notes_changed()
             return
         if event.button() != Qt.LeftButton:
-            return
-        # Ignore the click if the next note wouldn't fit before the right edge.
-        # (Scrolling for longer pieces comes in a later milestone.)
-        if self.note_x(len(self.part.notes)) > self.width() - MARGIN:
             return
         if self.settings.rest_mode:
             step = None  # a rest has no pitch, so the click's height doesn't matter
         else:
             step = y_to_step(event.position().y())
-        self.part.add_note(Note(step, self.settings.duration))
-        self.update()  # ask Qt to repaint soon; it will call paintEvent
-        self.changed.emit()  # tell the window there's something new to save
+        note = Note(step, self.settings.duration)
+        self.part.add_note(note)
+        self.notes_changed()
+        # Keep the new note, and the empty space after it, in view.
+        self.scroll_to.emit(self.note_x(len(self.part.notes)))
+        if self.settings.preview and not note.is_rest:
+            self.preview.emit(self.part.instrument.program, note.midi_pitch(self.part.clef))
 
     def paintEvent(self, event):
         # Qt calls paintEvent automatically whenever the widget needs to be
@@ -371,6 +392,8 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
 
+        # The player comes first: every tab's staff connects to it as it's made.
+        self.player = Player()
         self.file_path = None           # where the score was last saved; None = never saved
         self.score = Score()            # all the music: one Part per tab
         self.settings = EditSettings()  # shared by every tab's staff
@@ -433,9 +456,16 @@ class MainWindow(QMainWindow):
         self.delete_last_action.triggered.connect(self.on_delete_last)
         toolbar.addAction(self.delete_last_action)
 
+        toolbar.addSeparator()
+        self.preview_action = QAction("Preview", self)
+        self.preview_action.setToolTip("Hear each note as you place it")
+        self.preview_action.setCheckable(True)
+        self.preview_action.setChecked(self.settings.preview)
+        self.preview_action.toggled.connect(self.on_preview_toggled)
+        toolbar.addAction(self.preview_action)
+
         # Transport controls: the buttons that control playback. They get
         # their own toolbar, on a second row (one long row didn't fit).
-        self.player = Player()
         self.addToolBarBreak()  # start a new row of toolbars
         toolbar = self.addToolBar("Playback")
         self.play_action = QAction("Play", self)
@@ -488,7 +518,16 @@ class MainWindow(QMainWindow):
 
     def current_staff(self):
         """The staff in the tab that's open right now."""
-        return self.tabs.currentWidget()
+        return self.staff_at(self.tabs.currentIndex())
+
+    def staff_at(self, index):
+        """The staff in tab number `index`, or None if there's no such tab.
+
+        Each tab holds a scroll area, and the staff is inside it;
+        QScrollArea.widget() gives back what's inside.
+        """
+        area = self.tabs.widget(index)
+        return area.widget() if area is not None else None
 
     def add_tab(self, instrument):
         """Add a part for this instrument to the score, with a tab to show it."""
@@ -499,7 +538,16 @@ class MainWindow(QMainWindow):
         """Make a tab for a part that's already in the score."""
         staff = StaffWidget(part, self.settings)
         staff.changed.connect(self.mark_dirty)  # any edit means there's something to save
-        index = self.tabs.addTab(staff, self.unused_tab_label(part.instrument.name))
+        staff.preview.connect(self.player.preview)  # the signal's (program, pitch) go straight through
+
+        # Put the staff in a scroll area, so long pieces can scroll sideways.
+        area = QScrollArea()
+        area.setWidget(staff)
+        area.setWidgetResizable(True)  # stretch the staff to fill the window when it's short
+        area.setFocusPolicy(Qt.NoFocus)  # keep Space for play/pause
+        staff.scroll_to.connect(lambda x, area=area: self.scroll_into_view(area, x))
+
+        index = self.tabs.addTab(area, self.unused_tab_label(part.instrument.name))
         self.tabs.tabBar().setTabButton(index, QTabBar.LeftSide, self.make_mute_solo(part))
         self.tabs.setCurrentIndex(index)  # switch to the new tab
         self.refresh_audibility()  # a new part may be silent if another tab is soloed
@@ -561,7 +609,14 @@ class MainWindow(QMainWindow):
 
     def all_staffs(self):
         """Every tab's staff, in tab order."""
-        return [self.tabs.widget(i) for i in range(self.tabs.count())]
+        return [self.staff_at(i) for i in range(self.tabs.count())]
+
+    def scroll_into_view(self, area, x):
+        """Scroll a tab's scroll area so position x on its staff is visible."""
+        # The staff may have just grown, and Qt only updates the scroll bar's
+        # range a moment later. A 0 ms single-shot timer runs our code as
+        # soon as Qt has finished what it's doing: "do this next".
+        QTimer.singleShot(0, lambda: area.ensureVisible(round(x), 0, 3 * NOTE_SPACING, 0))
 
     def on_add_instrument(self, action):
         """Slot: an instrument was chosen from the "+ Instrument" menu."""
@@ -581,10 +636,10 @@ class MainWindow(QMainWindow):
             # Removing a part renumbers the ones after it, which would mix up
             # the player's part numbers. Stopping first keeps things simple.
             self.player.stop()
-        staff = self.tabs.widget(index)
+        area = self.tabs.widget(index)
         self.tabs.removeTab(index)
         self.score.remove_part(index)  # keep the score lined up with the tabs
-        staff.deleteLater()  # free the widget once Qt is done with it
+        area.deleteLater()  # free the scroll area (and the staff inside it)
         self.refresh_audibility()  # closing a soloed tab un-silences the others
         self.mark_dirty()
 
@@ -598,6 +653,10 @@ class MainWindow(QMainWindow):
         """Slot: called by Qt when the Rest button is switched on or off."""
         self.settings.rest_mode = checked
 
+    def on_preview_toggled(self, checked):
+        """Slot: the Preview button was switched on or off."""
+        self.settings.preview = checked
+
     def on_delete_last(self):
         """Slot: delete the last note in the open tab."""
         self.current_staff().delete_last_note()
@@ -610,7 +669,7 @@ class MainWindow(QMainWindow):
 
     def on_note_started(self, part_index, note_index):
         """Slot: move the cursor on that part's tab."""
-        staff = self.tabs.widget(part_index)  # tab i shows score.parts[i]
+        staff = self.staff_at(part_index)  # tab i shows score.parts[i]
         if staff is not None:
             staff.set_playing_index(note_index)
 
@@ -676,9 +735,9 @@ class MainWindow(QMainWindow):
         """Replace everything on screen with this score (after New or Open)."""
         self.player.stop()
         while self.tabs.count():  # remove every old tab
-            staff = self.tabs.widget(0)
+            area = self.tabs.widget(0)
             self.tabs.removeTab(0)
-            staff.deleteLater()
+            area.deleteLater()
         self.score = score
         self.file_path = path
         if not score.parts:
@@ -778,7 +837,7 @@ def main():
     app = QApplication(sys.argv)  # every Qt program needs exactly one of these
 
     window = MainWindow()
-    window.resize(800, 270)
+    window.resize(800, 330)
     window.show()
 
     # Start the event loop: Qt now waits for clicks, key presses, and repaint
