@@ -15,8 +15,8 @@ from PySide6.QtWidgets import (
 )
 
 from model import (  # our own model.py
-    EIGHTH, FLAT, HALF, INSTRUMENT_GROUPS, KEY_NAMES, NATURAL, PIANO, QUARTER, SHARP, WHOLE,
-    Note, Score, key_alter, key_name, letter_of,
+    DRUM_MAP, EIGHTH, FLAT, HALF, INSTRUMENT_GROUPS, KEY_NAMES, NATURAL, PIANO, QUARTER,
+    SHARP, WHOLE, Note, Score, key_alter, key_name, letter_of, nearest_drum_step,
 )
 from edits import (
     AddNote, AddPart, ChangeAlter, ChangeInstrument, ChangeKey, ChangeTempo, MoveNote,
@@ -108,6 +108,7 @@ ACCIDENTAL_HEIGHT = {SHARP: 2.6, FLAT: 2.3, NATURAL: 2.6}
 # zig-zag pattern, 2 steps lower.
 KEY_SHARP_STEPS = {"treble": [8, 5, 9, 6, 3, 7, 4], "bass": [6, 3, 7, 4, 1, 5, 2]}
 KEY_FLAT_STEPS = {"treble": [4, 7, 3, 6, 2, 5, 1], "bass": [2, 5, 1, 4, 0, 3, -1]}
+DRUM_CLEF_WIDTH = LINE_SPACING * 0.9   # the percussion clef's two bars, side to side
 KEY_GAP = 6                            # space between the clef and the key signature
 KEY_SIGN_SPACING = LINE_SPACING * 1.25  # distance between the key's signs (a sharp is ~1 space wide)
 # After the key signature: half a note head + an accidental + small gaps.
@@ -165,7 +166,8 @@ class StaffWidget(QWidget):
     remove_requested = Signal(int)          # the index of a note to delete
     move_requested = Signal(int, int, int)  # (index, old step, new step) after a drag
 
-    preview = Signal(int, int)  # (instrument program, MIDI pitch): "let me hear this note"
+    preview = Signal(int, int, int)  # (sound bank, program, MIDI pitch): "let me hear this note"
+    hint = Signal(str)          # a short message for the status bar (e.g. which drum is here)
     scroll_to = Signal(float)   # an x position that should be scrolled into view
 
     def __init__(self, part, settings):
@@ -287,7 +289,13 @@ class StaffWidget(QWidget):
     def preview_note(self, note):
         """Ask to hear this note, if Preview is switched on."""
         if self.settings.preview and not note.is_rest:
-            self.preview.emit(self.part.instrument.program, self.part.sounding_pitch(note))
+            instrument = self.part.instrument
+            self.preview.emit(instrument.bank, instrument.program, self.part.sounding_pitch(note))
+
+    def step_at(self, y):
+        """The staff step for a y position; on a drum staff, the nearest drum."""
+        step = y_to_step(y)
+        return nearest_drum_step(step) if self.part.instrument.is_drums else step
 
     def mousePressEvent(self, event):
         # Qt calls this automatically whenever the mouse is clicked on us.
@@ -311,9 +319,9 @@ class StaffWidget(QWidget):
         if self.settings.rest_mode:
             step = None  # a rest has no pitch, so the click's height doesn't matter
         else:
-            step = y_to_step(event.position().y())
-        if step is None:
-            alter = NATURAL  # rests have no accidental
+            step = self.step_at(event.position().y())
+        if step is None or self.part.instrument.is_drums:
+            alter = NATURAL  # rests and drums have no accidental
         elif self.settings.alter is None:
             # Follow the key: e.g. in G major an F becomes F♯.
             alter = key_alter(letter_of(step, self.part.clef), self.key)
@@ -330,11 +338,14 @@ class StaffWidget(QWidget):
             # hand over notes that can be grabbed.
             self.hover_index = self.note_head_at(event.position())
             self.setCursor(Qt.OpenHandCursor if self.hover_index is not None else Qt.ArrowCursor)
+            if self.part.instrument.is_drums:
+                # Drum staffs: say which drum is at the mouse's height.
+                self.hint.emit(DRUM_MAP[self.step_at(event.position().y())].name)
             return
         # While dragging, the note follows the mouse right away, so you can see
         # and hear where it's going. The undoable edit is made on release.
         note = self.part.notes[self.drag_index]
-        new_step = y_to_step(event.position().y())
+        new_step = self.step_at(event.position().y())
         if new_step != note.step:  # only when it crosses into a new line or space
             note.step = new_step
             self.update()
@@ -422,6 +433,9 @@ class StaffWidget(QWidget):
         Returns (font, position, right edge). Both drawing the clef and
         placing the key signature after it use this, so they always agree.
         """
+        if self.part.instrument.is_drums:
+            # The drum clef is drawn as shapes, not a font symbol (see draw_clef).
+            return None, None, MARGIN + 8 + DRUM_CLEF_WIDTH
         clef = self.part.clef
         symbol = CLEF_SYMBOLS[clef]
         top = step_to_y(CLEF_TOP_STEP[clef])
@@ -444,6 +458,14 @@ class StaffWidget(QWidget):
 
     def draw_clef(self, painter):
         """Draw the part's clef symbol at the start of the staff."""
+        if self.part.instrument.is_drums:
+            # The percussion clef: two thick bars across the middle of the staff.
+            top, bottom = step_to_y(6), step_to_y(2)
+            bar = DRUM_CLEF_WIDTH * 0.35
+            left = MARGIN + 8
+            painter.fillRect(QRectF(left, top, bar, bottom - top), self.ink)
+            painter.fillRect(QRectF(left + DRUM_CLEF_WIDTH - bar, top, bar, bottom - top), self.ink)
+            return
         font, position, _ = self.clef_layout()
         painter.setFont(font)
         painter.drawText(position, CLEF_SYMBOLS[self.part.clef])
@@ -459,6 +481,8 @@ class StaffWidget(QWidget):
 
     def draw_key_signature(self, painter):
         """Draw the key's sharps or flats after the clef, in their standard places."""
+        if self.key == 0:
+            return  # C major (and every drum staff): nothing to draw
         if self.key > 0:
             steps, alter = KEY_SHARP_STEPS[self.part.clef][:self.key], SHARP
         else:
@@ -523,15 +547,24 @@ class StaffWidget(QWidget):
         y = step_to_y(note.step)
         self.draw_ledger_lines(painter, x, note.step)
 
-        # Note head: whole and half notes are hollow; shorter notes are filled.
-        # The pen draws outlines; the brush fills the inside.
-        if duration >= HALF:
-            painter.setPen(QPen(self.ink, 1.8))  # thicker outline for hollow heads
-            painter.setBrush(Qt.NoBrush)
+        is_cymbal = (self.part.instrument.is_drums
+                     and DRUM_MAP[nearest_drum_step(note.step)].cymbal)
+        if is_cymbal:
+            # Cymbals on a drum staff get an x-shaped head instead of an oval.
+            half_w, half_h = NOTE_HEAD_WIDTH * 0.4, NOTE_HEAD_HEIGHT * 0.45
+            painter.setPen(QPen(self.ink, 1.8))
+            painter.drawLine(QPointF(x - half_w, y - half_h), QPointF(x + half_w, y + half_h))
+            painter.drawLine(QPointF(x - half_w, y + half_h), QPointF(x + half_w, y - half_h))
         else:
-            painter.setPen(QPen(self.ink, 1))
-            painter.setBrush(self.ink)
-        painter.drawEllipse(QPointF(x, y), NOTE_HEAD_WIDTH / 2, NOTE_HEAD_HEIGHT / 2)
+            # Note head: whole and half notes are hollow; shorter notes are filled.
+            # The pen draws outlines; the brush fills the inside.
+            if duration >= HALF:
+                painter.setPen(QPen(self.ink, 1.8))  # thicker outline for hollow heads
+                painter.setBrush(Qt.NoBrush)
+            else:
+                painter.setPen(QPen(self.ink, 1))
+                painter.setBrush(self.ink)
+            painter.drawEllipse(QPointF(x, y), NOTE_HEAD_WIDTH / 2, NOTE_HEAD_HEIGHT / 2)
         painter.setPen(QPen(self.ink, 1))
 
         if duration == WHOLE:
@@ -814,7 +847,8 @@ class MainWindow(QMainWindow):
         """
         staff = StaffWidget(part, self.settings)
         staff.set_key(part.written_key(self.score.key))  # transposing parts show their own key
-        staff.preview.connect(self.player.preview)  # the signal's (program, pitch) go straight through
+        staff.preview.connect(self.player.preview)  # the signal's (bank, program, pitch) go straight through
+        staff.hint.connect(lambda text: self.statusBar().showMessage(text, 2000))
         # Turn the staff's requests into undoable commands. "part=part" stores
         # this tab's part inside each lambda (see make_mute_solo).
         staff.add_requested.connect(
@@ -1130,6 +1164,9 @@ class MainWindow(QMainWindow):
     def change_hovered_alter(self, direction):
         """Raise (+1) or lower (-1) the note under the mouse by a half step."""
         staff = self.current_staff()
+        if staff.part.instrument.is_drums:
+            self.statusBar().showMessage("Drums have no sharps or flats.", 3000)
+            return
         index = staff.hovered_note_index()
         if index is None:
             self.statusBar().showMessage("Point at a note, then press + or -.", 3000)

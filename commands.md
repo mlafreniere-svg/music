@@ -153,6 +153,7 @@ A `*` after the name in the title bar means there are unsaved changes. Undoing b
 | Right-click a note | Delete that note. |
 | Drag a note up/down | Change its pitch (the pointer becomes a hand over a note). |
 | Right-click a tab | Change that tab's instrument. |
+| Point at a Drum Kit staff | The status bar names the drum at that height (kick, snare, hi-hat...). |
 
 
 ## Testing (pytest)

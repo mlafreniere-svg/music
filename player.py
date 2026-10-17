@@ -99,7 +99,8 @@ class Player(QObject):
         # Give each part's channel that part's instrument sound ("program").
         for part_index, part in enumerate(score.parts):
             channel = CHANNELS[part_index]
-            self.synth.program_select(channel, self.soundfont_id, 0, part.instrument.program)
+            instrument = part.instrument
+            self.synth.program_select(channel, self.soundfont_id, instrument.bank, instrument.program)
         if not self.events:
             return  # nothing written yet
         # perf_counter() is a high-precision clock, in seconds. Only the
@@ -196,10 +197,10 @@ class Player(QObject):
                 self.synth.noteoff(channel, pitch)
                 self.sounding.discard((channel, pitch))
 
-    def preview(self, program, pitch):
+    def preview(self, bank, program, pitch):
         """Play one short note on the preview channel (works while playing, too)."""
         self.end_preview()  # cut off the previous preview, if it's still sounding
-        self.synth.program_select(PREVIEW_CHANNEL, self.soundfont_id, 0, program)
+        self.synth.program_select(PREVIEW_CHANNEL, self.soundfont_id, bank, program)
         self.synth.noteon(PREVIEW_CHANNEL, pitch, PREVIEW_VELOCITY)
         self.preview_pitch = pitch
         self.preview_timer.start(round(PREVIEW_SECONDS * 1000))

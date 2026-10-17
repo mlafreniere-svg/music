@@ -156,6 +156,46 @@ class Instrument:
     # sounding = written + transpose (in half steps). A guitar sounds an
     # octave lower than written (-12); a B-flat trumpet a whole step lower (-2).
     transpose: int = 0
+    # Which bank of the SoundFont the sound comes from. Bank 0 holds the
+    # normal instruments; bank 128 holds the drum kits.
+    bank: int = 0
+
+    @property
+    def is_drums(self):
+        return self.clef == PERCUSSION
+
+
+# --- Drums ---------------------------------------------------------------
+# On a drum staff each line or space means a different drum, not a pitch.
+
+PERCUSSION = "percussion"  # the clef name for drum parts
+DRUM_BANK = 128
+
+
+@dataclass(frozen=True)
+class Drum:
+    name: str
+    key: int      # the General MIDI drum sound: which drum the kit plays
+    cymbal: bool  # cymbals are written with x-shaped note heads
+
+
+# Staff step -> drum, in standard drum notation (steps as on a treble staff).
+DRUM_MAP = {
+    10: Drum("Crash cymbal", 49, True),   # A5, on a ledger line above the staff
+    9: Drum("Hi-hat", 42, True),          # G5, the space above the staff
+    8: Drum("Ride cymbal", 51, True),     # F5, the top line
+    7: Drum("High tom", 50, False),       # E5
+    6: Drum("Mid tom", 47, False),        # D5
+    5: Drum("Snare drum", 38, False),     # C5, the third space
+    3: Drum("Floor tom", 43, False),      # A4, the second space
+    1: Drum("Kick (bass drum)", 36, False),  # F4, the bottom space
+    -1: Drum("Hi-hat pedal", 44, True),   # D4, just below the staff
+}
+
+
+def nearest_drum_step(step):
+    """The closest staff step that has a drum (clicks on a drum staff snap to it)."""
+    return min(DRUM_MAP, key=lambda drum_step: abs(drum_step - step))
 
 
 # The instruments the "+" menu offers, in groups (the menu shows the headings).
@@ -190,6 +230,9 @@ INSTRUMENT_GROUPS = [
         Instrument("Trombone", 57, "bass"),
         Instrument("Tuba", 58, "bass"),
     ]),
+    ("Percussion", [
+        Instrument("Drum Kit", 0, PERCUSSION, bank=DRUM_BANK),  # program 0 = the standard kit
+    ]),
 ]
 # All instruments in one list: a "nested" comprehension, with two for's.
 INSTRUMENTS = [instrument for _, group in INSTRUMENT_GROUPS for instrument in group]
@@ -204,6 +247,11 @@ def rewrite_for_instrument(notes, old, new):
     """
     if old.clef == new.clef and old.transpose == new.transpose:
         return [None if n.is_rest else (n.step, n.alter) for n in notes]
+    if old.is_drums or new.is_drums:
+        # Drums have no pitch, so there's no sound to keep: notes keep their
+        # place on the staff (snapped to a drum when going to drums).
+        snap = nearest_drum_step if new.is_drums else (lambda step: step)
+        return [None if n.is_rest else (snap(n.step), NATURAL) for n in notes]
     # How much higher the new instrument's written notes are (0-11 half steps,
     # ignoring octaves), and so how many letters they move.
     letters_up = LETTERS_FOR_SEMITONES[(old.transpose - new.transpose) % 12]
@@ -285,6 +333,8 @@ class Part:
         """
         if note.is_rest:
             return None
+        if self.instrument.is_drums:
+            return DRUM_MAP[nearest_drum_step(note.step)].key  # which drum to hit
         return note.midi_pitch(self.clef) + self.instrument.transpose
 
     def written_key(self, concert_key):
@@ -292,7 +342,10 @@ class Part:
 
         A B-flat trumpet's part is written a whole step higher, so a piece
         in C major shows D major (2 sharps) on the trumpet's staff.
+        Drum parts never have a key signature.
         """
+        if self.instrument.is_drums:
+            return 0
         # Moving up by 1 half step adds 7 sharps (or removes 5 flats) to a key,
         # so moving the written notes up by -transpose half steps adds this many:
         key = concert_key + (-self.instrument.transpose * 7) % 12
@@ -328,6 +381,8 @@ class Part:
         each letter normally is; an accidental changes that line or space
         for the rest of its measure; a bar line resets everything.
         """
+        if self.instrument.is_drums:
+            return [None] * len(self.notes)  # drums have no sharps or flats
         signs = []
         current = {}  # staff step -> its alter so far in this measure
         beats = 0.0

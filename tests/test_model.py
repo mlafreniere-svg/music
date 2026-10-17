@@ -9,7 +9,7 @@ import pytest
 
 from model import (
     EIGHTH, FLAT, HALF, INSTRUMENTS, KEY_NAMES, NATURAL, PIANO, QUARTER, SHARP, WHOLE,
-    Note, Part, Score, find_instrument, key_alter, key_name, letter_of,
+    Note, Part, Score, find_instrument, key_alter, key_name, letter_of, nearest_drum_step,
     rewrite_for_instrument, split_duration, step_to_midi,
 )
 
@@ -305,6 +305,41 @@ def test_written_key_for_transposing_instruments():
     assert Part(instrument=TRUMPET).written_key(6) == -4    # F# + 2 -> A-flat, not 8 sharps
 
 
+DRUMS = find_instrument("Drum Kit")
+
+
+def test_drum_staff_positions_play_drums():
+    part = Part([Note(1), Note(5), Note(9)], DRUMS)  # kick, snare, hi-hat
+    assert [part.sounding_pitch(n) for n in part.notes] == [36, 38, 42]
+
+
+def test_drum_positions_snap_to_the_nearest_drum():
+    assert nearest_drum_step(4) in (3, 5)  # between floor tom and snare
+    assert nearest_drum_step(0) in (-1, 1)
+    assert nearest_drum_step(12) == 10     # far above: the crash
+    assert nearest_drum_step(-6) == -1     # far below: hi-hat pedal
+
+
+def test_drums_have_no_key_or_accidentals():
+    part = Part([Note(5), Note(5)], DRUMS)
+    assert part.written_key(3) == 0
+    assert part.accidental_signs(3) == [None, None]
+
+
+def test_switching_to_drums_keeps_positions():
+    notes = [Note(5), Note(4, alter=SHARP), Note(None)]
+    drums = switched(notes, VIOLIN, DRUMS)
+    assert drums[0].step == 5 and drums[1].step in (3, 5) and drums[2].is_rest
+    assert all(n.alter == NATURAL for n in drums)
+    assert [n.step for n in switched(drums, DRUMS, VIOLIN)][:2] == [n.step for n in drums][:2]
+
+
+def test_drum_timeline_uses_drum_sounds():
+    score = Score()
+    score.add_part(DRUMS).notes = [Note(1), Note(5)]
+    assert [e.pitch for e in score.timeline() if e.starts] == [36, 38]
+
+
 def test_instrument_transpositions_are_sensible():
     for instrument in INSTRUMENTS:
         assert -24 <= instrument.transpose <= 0  # all of ours sound at or below what's written
@@ -331,7 +366,7 @@ def test_instrument_list_is_sensible():
     assert len(names) == len(set(names))  # no duplicate names (a set drops repeats)
     for instrument in INSTRUMENTS:
         assert 0 <= instrument.program <= 127
-        assert instrument.clef in ("treble", "bass")
+        assert instrument.clef in ("treble", "bass", "percussion")
 
 
 def test_find_instrument_unknown_name():
