@@ -63,6 +63,13 @@ CLEF_BOTTOM_LINE = {
 
 STAFF_MIDDLE_STEP = 4  # the middle line of the staff
 
+# The staff steps a saved note may use: from two ledger lines below the
+# staff to two above. The staff has room to draw these.
+LOWEST_FILE_STEP = -4
+HIGHEST_FILE_STEP = 12
+
+MAX_PARTS = 14  # instruments per score (player.py gives each its own MIDI channel)
+
 # Accidentals: how far a note is raised or lowered from its letter, in half steps.
 FLAT = -1
 NATURAL = 0

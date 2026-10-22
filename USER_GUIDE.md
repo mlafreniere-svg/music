@@ -2,7 +2,8 @@
 
 Write music by clicking notes onto a staff, hear it played back, and save, export or print it.
 
-Inside the app, this guide is under **Help ▸ User Guide** (F1).
+Inside the app, this guide is under **Help ▸ User Guide** (F1); **Help ▸ Keyboard Shortcuts** jumps
+straight to the reference table at the end.
 
 
 ## Starting the app
@@ -119,6 +120,28 @@ Key and Time are undoable and saved with the file.
 - **Tempo**: the slider sets beats (quarter notes) per minute. It's saved with the piece.
 
 
+## Songs from an AI
+
+An AI chat (for example Google AI Mode) can arrange a song for you, as a file the app opens directly.
+
+1. **Help ▸ Copy AI Translation Guide.** This copies instructions that explain the app to the AI:
+   its file format, instruments and limits.
+2. In the AI chat, **paste**, then type the song's name after `SONG REQUEST:` (add wishes if you
+   like, e.g. "jazzy, with saxophone"). Send it.
+3. **Copy the AI's whole reply.**
+4. In the app: **File ▸ Paste Song from AI** (Ctrl+Shift+V), paste, and click **Open Song**.
+5. The song opens as a new, unsaved song. A message shows the AI's notes (what it simplified) and any
+   small fixes the app made. **Save** it (Ctrl+S) to keep it.
+
+If the app finds problems it can't fix, it lists them instead of opening the song. Click
+**Copy for the AI**, paste that into the chat, and the AI will send a corrected file; paste that the
+same way.
+
+Keep in mind: the AI writes the song from memory, so less famous songs may not be quite right; it may
+decline some copyrighted songs; and very long songs are shortened to their best-known part (64
+measures at most).
+
+
 ## Files
 
 | Menu item | Key | What it does |
@@ -129,6 +152,8 @@ Key and Time are undoable and saved with the file.
 | File ▸ Save As | Ctrl+Shift+S | Save under a new name. |
 | File ▸ Export MIDI | Ctrl+E | A `.mid` file that MuseScore, a DAW, or any music program can open. |
 | File ▸ Print to PDF | Ctrl+P | Every instrument's music on US Letter pages, ready to print. |
+| File ▸ Paste Song from AI | Ctrl+Shift+V | Open a song from an AI's reply (see "Songs from an AI"). |
+| Help ▸ Copy AI Translation Guide | | Copy the instructions to give an AI along with a song name. |
 
 Files are saved in the `saved_music` folder by default. Songs, MIDI files and PDFs are never added to git.
 
@@ -159,6 +184,7 @@ If you close the app or open another file with unsaved changes, it asks: **Save*
 | `Ctrl+Shift+S` | Save As |
 | `Ctrl+E` | Export MIDI |
 | `Ctrl+P` | Print to PDF |
+| `Ctrl+Shift+V` | Paste a song from an AI |
 | `F1` | This guide |
 | `Alt+F` `Alt+E` `Alt+V` `Alt+H` | File / Edit / View / Help menus |
 

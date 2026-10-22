@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 
 import fluidsynth
+import model
 from PySide6.QtCore import QObject, Qt, QTimer, Signal
 
 SOUNDFONT = Path(__file__).parent / "soundfonts" / "GeneralUser-GS.sf2"
@@ -23,6 +24,7 @@ DRUM_CHANNEL = 9
 PREVIEW_CHANNEL = 15
 CHANNELS = [c for c in range(16) if c not in (DRUM_CHANNEL, PREVIEW_CHANNEL)]
 MAX_PARTS = len(CHANNELS)
+assert MAX_PARTS == model.MAX_PARTS  # the model's limit must match the channels we have
 
 PREVIEW_SECONDS = 0.4  # how long a preview note sounds
 PREVIEW_VELOCITY = 90  # a little softer than playback

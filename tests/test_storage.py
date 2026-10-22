@@ -96,6 +96,14 @@ def test_time_signature_is_saved(tmp_path):
     loaded = load_score(path)
     assert loaded.time_signature == (6, 8)  # a tuple again, so the scores compare equal
     assert loaded == score
+    assert '"time_signature": "6/8"' in path.read_text(encoding="utf-8")  # written as text
+
+
+def test_old_bracket_time_signatures_still_load():
+    data = score_to_dict(make_duet())
+    data["time_signature"] = [3, 4]  # how versions 4 and 5 wrote it
+    data["version"] = 5
+    assert score_from_dict(data).time_signature == (3, 4)
 
 
 def test_older_files_are_in_four_four():

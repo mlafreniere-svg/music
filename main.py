@@ -12,8 +12,8 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QDialog, QFileDialog, QHBoxLayout, QLabel, QMainWindow, QMenu,
-    QMessageBox, QScrollArea, QSlider, QTabBar, QTabWidget, QTextBrowser, QToolButton,
-    QVBoxLayout, QWidget,
+    QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QSlider, QTabBar, QTabWidget,
+    QTextBrowser, QToolButton, QVBoxLayout, QWidget,
 )
 
 from model import (  # our own model.py
@@ -27,6 +27,8 @@ from edits import (
 )
 from midi_export import export_midi
 from pdf_export import Section, export_pdf
+from song_import import import_song, message_for_ai
+from translation_guide import build_guide
 from player import MAX_PARTS, PAUSED, PLAYING, STOPPED, Player
 from storage import FILE_EXTENSION, display_name, load_score, save_score
 
@@ -1138,6 +1140,69 @@ class HelpWindow(QDialog):
             self.browser.verticalScrollBar().setValue(round(top))
 
 
+class PasteSongWindow(QDialog):
+    """File ▸ Paste Song: paste an AI's reply (see translation_plan.md).
+
+    "Open Song" reads it with song_import. If it works, the window closes and
+    `self.result` holds the song; if not, the problems are shown here, with a
+    button to copy them as a message for the AI.
+    """
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.setWindowTitle("Paste Song")
+        self.resize(640, 520)
+        self.result = None
+
+        intro = QLabel("Paste the AI's whole reply below (its chatter is ignored), then click "
+                       "<b>Open Song</b>. To get a reply: Help ▸ Copy AI Translation Guide, paste it "
+                       "into the AI, and add the song's name.")
+        intro.setWordWrap(True)
+        self.paste_box = QPlainTextEdit()  # a plain multi-line text box
+        self.paste_box.setPlaceholderText("Paste here (Ctrl+V)")
+        self.problem_box = QPlainTextEdit()
+        self.problem_box.setReadOnly(True)
+        self.problem_box.setMaximumHeight(150)
+        self.problem_box.hide()  # only shown when there are problems
+
+        self.copy_button = QPushButton("Copy for the AI")
+        self.copy_button.setToolTip("Copies the problems as a message to paste back to the AI")
+        self.copy_button.clicked.connect(self.copy_for_ai)
+        self.copy_button.hide()
+        open_button = QPushButton("Open Song")
+        open_button.setDefault(True)  # Enter presses it
+        open_button.clicked.connect(self.open_song)
+        cancel_button = QPushButton("Cancel")
+        cancel_button.clicked.connect(self.reject)  # reject(): close, reporting "cancelled"
+
+        buttons = QHBoxLayout()
+        buttons.addWidget(self.copy_button)
+        buttons.addStretch()  # empty space that pushes the next buttons to the right
+        buttons.addWidget(open_button)
+        buttons.addWidget(cancel_button)
+        layout = QVBoxLayout(self)
+        layout.addWidget(intro)
+        layout.addWidget(self.paste_box)
+        layout.addWidget(self.problem_box)
+        layout.addLayout(buttons)
+
+    def open_song(self):
+        result = import_song(self.paste_box.toPlainText())
+        if result.ok:
+            self.result = result
+            self.accept()  # accept(): close, reporting "OK"
+            return
+        self.last_problems = result
+        self.problem_box.setPlainText(
+            "The song couldn't be opened:\n" + "\n".join(f"• {p}" for p in result.problems))
+        self.problem_box.show()
+        self.copy_button.show()
+
+    def copy_for_ai(self):
+        QApplication.clipboard().setText(message_for_ai(self.last_problems))
+        self.copy_button.setText("Copied! Paste it into the AI chat")
+
+
 class MainWindow(QMainWindow):
     """The application window: toolbars on top, one tab per instrument below.
 
@@ -1738,6 +1803,7 @@ class MainWindow(QMainWindow):
             ("Save &As...", QKeySequence.SaveAs, self.save_as),
             ("&Export MIDI...", QKeySequence("Ctrl+E"), self.export_midi_file),
             ("&Print to PDF...", QKeySequence.Print, self.export_pdf_file),  # Ctrl+P
+            ("Paste Song from &AI...", QKeySequence("Ctrl+Shift+V"), self.paste_song),
         ]:
             action = menu.addAction(text)
             action.setShortcut(shortcut)
@@ -1753,7 +1819,37 @@ class MainWindow(QMainWindow):
         guide.triggered.connect(lambda: self.show_help())
         shortcuts = menu.addAction("&Keyboard Shortcuts")
         shortcuts.triggered.connect(lambda: self.show_help("Keyboard and mouse reference"))
+        menu.addSeparator()
+        copy_guide = menu.addAction("Copy AI &Translation Guide")
+        copy_guide.triggered.connect(self.copy_translation_guide)
         self.help_window = None  # made the first time it's needed
+
+    def copy_translation_guide(self):
+        """Put the AI translation guide on the clipboard (see translation_plan.md)."""
+        QApplication.clipboard().setText(build_guide())
+        self.statusBar().showMessage(
+            "AI translation guide copied. Paste it into the AI chat and add a song name.", 6000)
+
+    def paste_song(self):
+        """File ▸ Paste Song: open a song from an AI's reply."""
+        if not self.maybe_save():  # ask about unsaved changes first, before any pasting
+            return
+        window = PasteSongWindow(self)
+        if window.exec() != QDialog.Accepted:  # exec() shows it and waits for OK or Cancel
+            return
+        result = window.result
+        self.show_score(result.score, None)
+        # A pasted song hasn't been saved anywhere yet: mark it unsaved (title gets a *).
+        self.undo_stack.resetClean()
+        self.update_title()
+        summary = []
+        if result.ai_notes:
+            summary.append("The AI's notes:\n" + result.ai_notes)
+        if result.fixes:
+            summary.append("Small fixes made while opening:\n" + "\n".join(f"• {f}" for f in result.fixes))
+        if summary:
+            QMessageBox.information(self, "Song opened", "\n\n".join(summary))
+        self.statusBar().showMessage("Song opened from the AI. Save it with Ctrl+S.", 6000)
 
     def show_help(self, section=None):
         """Open the user guide (at `section`, if given). It's a separate window,

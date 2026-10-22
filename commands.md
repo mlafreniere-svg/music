@@ -4,6 +4,9 @@ All the commands used in this project, grouped by topic. Run them in PowerShell
 (Windows Terminal, or VS Code's terminal: Ctrl+`).
 
 Inside Claude Code, put `!` in front of a command to run it yourself, for example `! git status`.
+
+In VS Code, if you mess up a file you haven't saved: `Ctrl+Z` (undo), or `Ctrl+Shift+P` → **Revert File**
+(reload it from disk, throwing away unsaved changes). A dot on the file's tab means it has unsaved changes.
 Only use `!` for commands; messages to Claude go without it.
 
 
@@ -125,6 +128,7 @@ Expand-Archive <zip> <folder>              # unzip it
 |---|---|
 | `python play_note.py` | Sound test: plays middle C. |
 | `python main.py` | Run the music staff app. |
+| `python translation_guide.py` | Rewrite `AI_TRANSLATION_GUIDE.md` from the app's current data (a test fails if it's out of date). |
 
 How to *use* the app (every button, key and mouse action) is in **[USER_GUIDE.md](USER_GUIDE.md)**,
 which the app also shows under **Help ▸ User Guide** (`F1`). This file covers the command line.

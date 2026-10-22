@@ -17,7 +17,7 @@ from model import COMMON_TIME, Note, Part, Score, find_instrument
 
 FILE_EXTENSION = ".music.json"
 FORMAT_NAME = "music-staff"  # identifies our files among all JSON files
-FORMAT_VERSION = 5           # bump this if the layout of the file ever changes
+FORMAT_VERSION = 6           # bump this if the layout of the file ever changes
 # Version history:
 #   1  tempo, parts, notes (step + duration)
 #   2  adds each note's "alter" (sharp/flat) and the score's "key" signature.
@@ -26,7 +26,24 @@ FORMAT_VERSION = 5           # bump this if the layout of the file ever changes
 #      Older files have no grand staffs, so they load unchanged.
 #   4  adds the "time_signature", e.g. [3, 4]. Older files are in 4/4.
 #   5  adds "chord" to notes that have extra pitches: [[step, alter], ...].
-READABLE_VERSIONS = (1, 2, 3, 4, 5)
+#   6  writes the time signature as text, "3/4" (an AI chat can mistake [3, 4]
+#      for a citation and drop it). The old [3, 4] form is still read.
+READABLE_VERSIONS = (1, 2, 3, 4, 5, 6)
+
+
+def time_signature_to_text(time_signature):
+    top, bottom = time_signature
+    return f"{top}/{bottom}"
+
+
+def time_signature_from_value(value):
+    """(top, bottom) from "3/4" or [3, 4]. Raises ValueError for anything else."""
+    if isinstance(value, str) and "/" in value:
+        top, bottom = value.split("/", 1)
+        return (int(top.strip()), int(bottom.strip()))
+    if isinstance(value, (list, tuple)) and len(value) == 2:
+        return (int(value[0]), int(value[1]))
+    raise ValueError(f"Not a time signature: {value!r}")
 
 
 def note_to_dict(note):
@@ -58,7 +75,7 @@ def score_to_dict(score):
         "version": FORMAT_VERSION,
         "tempo_bpm": score.tempo_bpm,
         "key": score.key,
-        "time_signature": list(score.time_signature),  # JSON has lists, not tuples
+        "time_signature": time_signature_to_text(score.time_signature),  # e.g. "3/4"
         "parts": [part_to_dict(part) for part in score.parts],
     }
 
@@ -92,8 +109,8 @@ def score_from_dict(data):
     score = Score(
         tempo_bpm=data["tempo_bpm"],
         key=data.get("key", 0),
-        # tuple(...) turns the saved list [3, 4] back into (3, 4).
-        time_signature=tuple(data.get("time_signature", COMMON_TIME)),
+        # "3/4" (or the older [3, 4]) back into the tuple (3, 4).
+        time_signature=time_signature_from_value(data.get("time_signature", COMMON_TIME)),
     )
     for part_data in data["parts"]:
         part = Part(instrument=find_instrument(part_data["instrument"]))  # grand: makes .lower
