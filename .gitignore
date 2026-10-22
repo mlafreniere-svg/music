@@ -13,6 +13,11 @@ saved_music/*
 *.mid
 *.pdf
 
+# Songs chosen to share on GitHub, one line each, with why it's OK to share.
+# The "!" un-ignores just that file; these lines must come after the rules above.
+# Public domain (1814):
+!saved_music/Star Spangled.mid
+
 # SoundFonts are large binaries; download them separately
 *.sf2
 *.sf3
