@@ -14,10 +14,6 @@ Processor	Intel(R) Celeron(R) N4120 CPU @ 1.10GHz   1.10 GHz
 
 Installed RAM	16.0 GB (15.8 GB usable)
 
-Device ID	BEC003ED-68AA-4518-9195-A19E7E5C7984
-
-Product ID	00356-07485-69537-AAOEM
-
 System type	64-bit operating system, x64-based processor
 
 Pen and touch	No pen or touch input is available for this display
